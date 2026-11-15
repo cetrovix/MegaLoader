@@ -608,6 +608,15 @@ enum Media {
     static func errorText(_ err: String) -> String {
         let line = err.split(separator: "\n").last { $0.contains("ERROR") }.map(String.init) ?? err.split(separator: "\n").last.map(String.init) ?? ""
         let l = line.lowercased()
+        // сеть: сайт не находится / недоступен (VPN, провайдер, нет интернета)
+        if l.contains("could not resolve host") || l.contains("dns") || l.contains("name or service not known") || l.contains("nodename nor servname") {
+            let host = err.range(of: #"resolve host: ([A-Za-z0-9.\-]+)"#, options: .regularExpression).map { String(err[$0]).replacingOccurrences(of: "resolve host: ", with: "") } ?? L("сайтом", "the site")
+            return L("Не удаётся связаться с \(host) — сайт недоступен в этой сети. Проверь интернет или включи/выключи VPN и попробуй снова.",
+                     "Can't reach \(host) \u{2014} the site isn't reachable on this network. Check your internet or turn VPN on/off and try again.")
+        }
+        if l.contains("timed out") || l.contains("connection reset") || l.contains("transporterror") || l.contains("unable to download webpage") {
+            return L("Площадка не ответила — похоже, проблема с сетью или VPN. Попробуй ещё раз чуть позже.", "The site didn't respond \u{2014} looks like a network or VPN issue. Try again a bit later.")
+        }
         if l.contains("sign in") || l.contains("login") || l.contains("cookies") || l.contains("confirm you") {
             return L("Площадка просит вход. Включи «Вход через браузер» в Настройках и попробуй снова.", "The site requires sign-in. Turn on \u{201c}Sign in via browser\u{201d} in Settings and try again.") }
         if l.contains("private") { return L("Это приватное видео — скачать без доступа нельзя.", "This video is private.") }
