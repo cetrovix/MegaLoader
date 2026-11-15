@@ -14,11 +14,37 @@ struct RemoteFile: Identifiable, Hashable, Codable {
     enum Source: Hashable, Codable {
         case yandex(publicKey: String, path: String?, direct: URL?)   // path nil = ссылка на один файл
         case google(id: String)
+        case dropbox(url: String)                                     // прямая ссылка dl=1 (папка — одним zip)
+        case wetransfer(id: String, hash: String, recipient: String?, fileID: String)
+        case mailru(weblink: String)
+        case onedrive(token: String, itemID: String)
+        case pcloud(api: String, code: String, fileID: Int64?)
     }
 }
 
-enum Provider: String, Codable { case yandex = "Яндекс Диск", google = "Google Диск"
-    var title: String { self == .yandex ? L("Яндекс Диск", "Yandex Disk") : L("Google Диск", "Google Drive") }
+enum Provider: String, Codable, CaseIterable {
+    case yandex = "Яндекс Диск", google = "Google Диск", dropbox = "Dropbox", wetransfer = "WeTransfer",
+         mailru = "Облако Mail.ru", onedrive = "OneDrive", pcloud = "pCloud"
+    var title: String {
+        switch self {
+        case .yandex: L("Яндекс Диск", "Yandex Disk"); case .google: L("Google Диск", "Google Drive")
+        case .mailru: L("Облако Mail.ru", "Mail.ru Cloud"); default: rawValue
+        }
+    }
+    var color: Color {
+        switch self {
+        case .yandex: .yellow
+        case .google: Color(red: 0.5, green: 0.7, blue: 1)
+        case .dropbox: Color(red: 0.35, green: 0.55, blue: 1)
+        case .wetransfer: Color(red: 0.75, green: 0.6, blue: 1)
+        case .mailru: Color(red: 0.3, green: 0.75, blue: 1)
+        case .onedrive: Color(red: 0.4, green: 0.65, blue: 0.95)
+        case .pcloud: Color(red: 0.35, green: 0.85, blue: 0.75)
+        }
+    }
+    var short: String {
+        switch self { case .yandex: L("Яндекс", "Yandex"); case .google: "Google"; case .mailru: "Mail.ru"; default: rawValue }
+    }
 }
 
 struct ListResult { let rootName: String; let files: [RemoteFile]; let skipped: [String] }
@@ -92,6 +118,11 @@ func detect(_ link: String) -> Provider? {
     let l = link.lowercased()
     if l.contains("disk.yandex") || l.contains("yadi.sk") || l.contains("disk.360.yandex") { return .yandex }
     if l.contains("drive.google") || l.contains("docs.google") { return .google }
+    if l.contains("dropbox.com") || l.contains("db.tt") { return .dropbox }
+    if l.contains("we.tl") || l.contains("wetransfer.com") { return .wetransfer }
+    if l.contains("cloud.mail.ru") { return .mailru }
+    if l.contains("1drv.ms") || l.contains("onedrive.live.com") || l.contains("sharepoint.com") { return .onedrive }
+    if l.contains("pcloud.link") || l.contains("pcloud.com") { return .pcloud }
     return nil
 }
 
@@ -273,6 +304,205 @@ enum Google {
     }
 }
 
+// MARK: - Другие сервисы (публичные ссылки, без входа)
+
+/// Dropbox отдаёт файл (а папку — zip) программам; браузерам — страницу. Поэтому для него свой User-Agent
+let dropboxUA = "DiskLoader"
+func isDropboxHost(_ u: URL) -> Bool { (u.host ?? "").contains("dropbox") }
+
+func requestJSON(_ url: URL, method: String = "GET", body: [String: Any]? = nil, headers: [String: String] = [:]) async throws -> Any {
+    var r = URLRequest(url: url); r.httpMethod = method; r.setValue(UA, forHTTPHeaderField: "User-Agent")
+    headers.forEach { r.setValue($1, forHTTPHeaderField: $0) }
+    if let body { r.httpBody = try JSONSerialization.data(withJSONObject: body); r.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+    let (d, resp) = try await URLSession.shared.data(for: r)
+    if let h = resp as? HTTPURLResponse, !(200..<300).contains(h.statusCode) { throw LoaderError.http(h.statusCode) }
+    return try JSONSerialization.jsonObject(with: d)
+}
+
+enum Dropbox {
+    static func dl(_ link: String) -> String {
+        var c = URLComponents(string: link.trimmingCharacters(in: .whitespacesAndNewlines))!
+        var q = (c.queryItems ?? []).filter { $0.name != "dl" && $0.name != "raw" }; q.append(.init(name: "dl", value: "1")); c.queryItems = q
+        return c.url!.absoluteString
+    }
+    static func list(_ link: String) async throws -> ListResult {
+        let u = dl(link)
+        let p = try await Engine.probe(URL(string: u)!)
+        if p.html { throw LoaderError.parse(L("Dropbox не отдал файл — ссылка закрыта или удалена", "Dropbox didn't return a file \u{2014} the link is closed or deleted")) }
+        let isFolder = link.contains("/fo/") || link.contains("/sh/")
+        let name = p.name ?? (isFolder ? "Dropbox.zip" : (URL(string: link)?.lastPathComponent ?? "file"))
+        return ListResult(rootName: "", files: [RemoteFile(relPath: name, size: p.size, source: .dropbox(url: u))], skipped: [])
+    }
+}
+
+enum WeTransfer {
+    static func ids(_ link: String) async throws -> (id: String, hash: String, recipient: String?) {
+        var u = URL(string: link.trimmingCharacters(in: .whitespacesAndNewlines))!
+        if (u.host ?? "").contains("we.tl") {   // короткая ссылка — узнаём полную
+            var r = URLRequest(url: u); r.setValue(UA, forHTTPHeaderField: "User-Agent")
+            let (_, resp) = try await URLSession.shared.data(for: r); u = resp.url ?? u
+        }
+        let parts = u.path.split(separator: "/").map(String.init)
+        guard let i = parts.firstIndex(of: "downloads"), parts.count >= i + 3 else { throw LoaderError.badLink }
+        let rest = Array(parts[(i + 1)...])
+        return rest.count >= 3 ? (rest[0], rest[2], rest[1]) : (rest[0], rest[1], nil)
+    }
+    static func api(_ id: String, _ action: String, _ body: [String: Any]) async throws -> [String: Any] {
+        let j = try await requestJSON(URL(string: "https://wetransfer.com/api/v4/transfers/\(id)/\(action)")!, method: "POST", body: body,
+                                      headers: ["X-Requested-With": "XMLHttpRequest", "Origin": "https://wetransfer.com"])
+        return j as? [String: Any] ?? [:]
+    }
+    static func list(_ link: String) async throws -> ListResult {
+        let t = try await ids(link)
+        var body: [String: Any] = ["security_hash": t.hash]; if let r = t.recipient { body["recipient_id"] = r }
+        let j = try await api(t.id, "prepare-download", body)
+        let items = j["items"] as? [[String: Any]] ?? j["files"] as? [[String: Any]] ?? []
+        if items.isEmpty { throw LoaderError.parse(L("передача пустая или срок ссылки истёк (WeTransfer хранит 7 дней)", "the transfer is empty or expired (WeTransfer keeps files for 7 days)")) }
+        let files = items.map { f in
+            RemoteFile(relPath: (f["name"] as? String) ?? "file", size: (f["size"] as? NSNumber)?.int64Value,
+                       source: .wetransfer(id: t.id, hash: t.hash, recipient: t.recipient, fileID: "\(f["id"] ?? "")"))
+        }
+        let title = (j["display_name"] as? String) ?? (files.count > 1 ? "WeTransfer" : "")
+        return ListResult(rootName: files.count > 1 ? title : "", files: files, skipped: [])
+    }
+    static func resolve(id: String, hash: String, recipient: String?, fileID: String) async throws -> URL {
+        var body: [String: Any] = ["security_hash": hash, "intent": "single_file", "file_ids": [fileID]]
+        if let r = recipient { body["recipient_id"] = r }
+        guard let d = try await api(id, "download", body)["direct_link"] as? String, let u = URL(string: d) else { throw LoaderError.parse(L("WeTransfer не выдал ссылку на файл", "WeTransfer didn't return a file link")) }
+        return u
+    }
+}
+
+enum MailRu {
+    static func weblink(_ link: String) -> String? {
+        guard let r = link.range(of: "/public/") else { return nil }
+        var w = String(link[r.upperBound...]).components(separatedBy: "?").first ?? ""
+        while w.hasSuffix("/") { w.removeLast() }
+        return w.removingPercentEncoding ?? w
+    }
+    static func folder(_ w: String, offset: Int) async throws -> [String: Any] {
+        var c = URLComponents(string: "https://cloud.mail.ru/api/v2/folder")!
+        c.queryItems = [.init(name: "weblink", value: w), .init(name: "offset", value: "\(offset)"), .init(name: "limit", value: "500")]
+        return ((try await requestJSON(c.url!)) as? [String: Any])?["body"] as? [String: Any] ?? [:]
+    }
+    static func list(_ link: String) async throws -> ListResult {
+        guard let w = weblink(link) else { throw LoaderError.badLink }
+        let root = try await folder(w, offset: 0)
+        let name = root["name"] as? String ?? "Mail.ru"
+        if root["kind"] as? String == "file" {
+            return ListResult(rootName: "", files: [RemoteFile(relPath: name, size: (root["size"] as? NSNumber)?.int64Value, source: .mailru(weblink: w))], skipped: [])
+        }
+        var out: [RemoteFile] = []
+        try await walk(w, rel: "", into: &out, depth: 0)
+        return ListResult(rootName: name, files: out, skipped: [])
+    }
+    static func walk(_ w: String, rel: String, into out: inout [RemoteFile], depth: Int) async throws {
+        if depth > 30 { return }
+        var offset = 0
+        while true {
+            let b = try await folder(w, offset: offset)
+            let items = b["list"] as? [[String: Any]] ?? []
+            for it in items {
+                let n = it["name"] as? String ?? "?"; let r = rel.isEmpty ? n : rel + "/" + n
+                let wl = it["weblink"] as? String ?? (w + "/" + n)
+                if it["kind"] as? String == "folder" { try await walk(wl, rel: r, into: &out, depth: depth + 1) }
+                else { out.append(RemoteFile(relPath: r, size: (it["size"] as? NSNumber)?.int64Value, source: .mailru(weblink: wl))) }
+            }
+            offset += items.count
+            let cnt = b["count"] as? [String: Any]; let total = ((cnt?["files"] as? Int) ?? 0) + ((cnt?["folders"] as? Int) ?? 0)
+            if items.isEmpty || offset >= total { break }
+        }
+    }
+    static func resolve(_ w: String) async throws -> URL {
+        let d = ((try await requestJSON(URL(string: "https://cloud.mail.ru/api/v2/dispatcher")!)) as? [String: Any])?["body"] as? [String: Any]
+        guard let base = ((d?["weblink_get"] as? [[String: Any]])?.first?["url"] as? String) else { throw LoaderError.parse(L("Облако Mail.ru не выдало сервер загрузки", "Mail.ru Cloud didn't return a download server")) }
+        let path = w.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }.joined(separator: "/")
+        return URL(string: base + "/" + path)!
+    }
+}
+
+enum OneDrive {
+    static func token(_ link: String) -> String {
+        let b = Data(link.trimmingCharacters(in: .whitespacesAndNewlines).utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-")
+        return "u!" + b
+    }
+    static func item(_ t: String, _ path: String) async throws -> [String: Any] {
+        (try await requestJSON(URL(string: "https://api.onedrive.com/v1.0/shares/\(t)/\(path)")!, headers: ["Prefer": "autoredeem"])) as? [String: Any] ?? [:]
+    }
+    static func list(_ link: String) async throws -> ListResult {
+        let t = token(link)
+        let root = try await item(t, "root?expand=children")
+        let name = root["name"] as? String ?? "OneDrive"
+        if root["folder"] == nil {
+            return ListResult(rootName: "", files: [RemoteFile(relPath: name, size: (root["size"] as? NSNumber)?.int64Value, source: .onedrive(token: t, itemID: root["id"] as? String ?? ""))], skipped: [])
+        }
+        var out: [RemoteFile] = []
+        try await walk(t, root, rel: "", into: &out, depth: 0)
+        return ListResult(rootName: name, files: out, skipped: [])
+    }
+    static func walk(_ t: String, _ node: [String: Any], rel: String, into out: inout [RemoteFile], depth: Int) async throws {
+        if depth > 30 { return }
+        var children = node["children"] as? [[String: Any]] ?? []
+        var next = node["children@odata.nextLink"] as? String
+        while let n = next, let u = URL(string: n) {
+            let j = (try await requestJSON(u)) as? [String: Any] ?? [:]
+            children += j["value"] as? [[String: Any]] ?? []; next = j["@odata.nextLink"] as? String
+        }
+        for c in children {
+            let nm = c["name"] as? String ?? "?"; let r = rel.isEmpty ? nm : rel + "/" + nm; let id = c["id"] as? String ?? ""
+            if c["folder"] != nil { try await walk(t, try await item(t, "items/\(id)?expand=children"), rel: r, into: &out, depth: depth + 1) }
+            else { out.append(RemoteFile(relPath: r, size: (c["size"] as? NSNumber)?.int64Value, source: .onedrive(token: t, itemID: id))) }
+        }
+    }
+    static func resolve(token t: String, itemID: String) async throws -> URL {
+        let j = try await item(t, itemID.isEmpty ? "root" : "items/\(itemID)")
+        guard let s = j["@content.downloadUrl"] as? String, let u = URL(string: s) else { throw LoaderError.parse(L("OneDrive не выдал ссылку — возможно, владелец запретил скачивание", "OneDrive didn't return a link \u{2014} the owner may have blocked downloads")) }
+        return u
+    }
+}
+
+enum PCloud {
+    static func code(_ link: String) -> String? { URLComponents(string: link.trimmingCharacters(in: .whitespacesAndNewlines))?.queryItems?.first { $0.name == "code" }?.value }
+    static func call(_ api: String, _ method: String, _ q: [URLQueryItem]) async throws -> [String: Any] {
+        var c = URLComponents(string: "https://\(api)/\(method)")!; c.queryItems = q
+        return (try await requestJSON(c.url!)) as? [String: Any] ?? [:]
+    }
+    static func list(_ link: String) async throws -> ListResult {
+        guard let code = code(link) else { throw LoaderError.badLink }
+        // у pCloud два региона: США и Европа — пробуем оба
+        let hosts = link.contains("e.pcloud") ? ["eapi.pcloud.com", "api.pcloud.com"] : ["api.pcloud.com", "eapi.pcloud.com"]
+        for api in hosts {
+            let j = try await call(api, "showpublink", [.init(name: "code", value: code)])
+            guard (j["result"] as? Int) == 0, let meta = j["metadata"] as? [String: Any] else { continue }
+            let name = meta["name"] as? String ?? "pCloud"
+            if (meta["isfolder"] as? Bool) != true {
+                return ListResult(rootName: "", files: [RemoteFile(relPath: name, size: (meta["size"] as? NSNumber)?.int64Value, source: .pcloud(api: api, code: code, fileID: nil))], skipped: [])
+            }
+            var out: [RemoteFile] = []
+            walk(meta, api: api, code: code, rel: "", into: &out)
+            return ListResult(rootName: name, files: out, skipped: [])
+        }
+        throw LoaderError.parse(L("pCloud: ссылка недействительна или закрыта", "pCloud: the link is invalid or closed"))
+    }
+    static func walk(_ m: [String: Any], api: String, code: String, rel: String, into out: inout [RemoteFile]) {
+        for c in m["contents"] as? [[String: Any]] ?? [] {
+            let n = c["name"] as? String ?? "?"; let r = rel.isEmpty ? n : rel + "/" + n
+            if (c["isfolder"] as? Bool) == true { walk(c, api: api, code: code, rel: r, into: &out) }
+            else { out.append(RemoteFile(relPath: r, size: (c["size"] as? NSNumber)?.int64Value, source: .pcloud(api: api, code: code, fileID: (c["fileid"] as? NSNumber)?.int64Value))) }
+        }
+    }
+    static func resolve(api: String, code: String, fileID: Int64?) async throws -> URL {
+        var q: [URLQueryItem] = [.init(name: "code", value: code)]
+        if let f = fileID { q.append(.init(name: "fileid", value: "\(f)")) }
+        let j = try await call(api, "getpublinkdownload", q)
+        guard let host = (j["hosts"] as? [String])?.first, let path = j["path"] as? String, let u = URL(string: "https://\(host)\(path)") else {
+            throw LoaderError.parse(L("pCloud не выдал ссылку — возможно, исчерпан лимит трафика ссылки", "pCloud didn't return a link \u{2014} the link's traffic limit may be exhausted"))
+        }
+        return u
+    }
+}
+
 func dispositionName(_ h: String?) -> String? {
     guard let h else { return nil }
     if let r = h.range(of: #"filename\*=UTF-8''([^;]+)"#, options: .regularExpression) {
@@ -402,6 +632,7 @@ final class Engine: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         defer { Task { await Gate.shared.release() } }
         if raw.cancelled || Task.isCancelled { throw CancellationError() }
         var req = URLRequest(url: url)
+        if isDropboxHost(url) { req.setValue(dropboxUA, forHTTPHeaderField: "User-Agent") }
         let wantRange = from > 0 || to != nil
         if wantRange { req.setValue("bytes=\(from)-" + (to.map(String.init) ?? ""), forHTTPHeaderField: "Range") }
         let task = session.dataTask(with: req)
@@ -439,7 +670,8 @@ final class Engine: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     struct Probe { let url: URL; let size: Int64?; let ranges: Bool; let name: String?; let html: Bool }
     /// узнать размер, поддержку частей и имя, не скачивая файл
     static func probe(_ url: URL) async throws -> Probe {
-        var req = URLRequest(url: url); req.setValue("bytes=0-0", forHTTPHeaderField: "Range"); req.setValue(UA, forHTTPHeaderField: "User-Agent")
+        var req = URLRequest(url: url); req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        req.setValue(isDropboxHost(url) ? dropboxUA : UA, forHTTPHeaderField: "User-Agent")
         req.cachePolicy = .reloadIgnoringLocalCacheData
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
         guard let h = resp as? HTTPURLResponse else { throw LoaderError.parse(L("нет ответа", "no response")) }
@@ -735,7 +967,16 @@ final class Manager: NSObject, ObservableObject {
         status = L("Читаю содержимое \(p.title)…", "Reading \(p.title)…")
         Task {
             do {
-                let r = p == .yandex ? try await Yandex.list(l) : try await Google.list(l)
+                let r: ListResult
+                switch p {
+                case .yandex: r = try await Yandex.list(l)
+                case .google: r = try await Google.list(l)
+                case .dropbox: r = try await Dropbox.list(l)
+                case .wetransfer: r = try await WeTransfer.list(l)
+                case .mailru: r = try await MailRu.list(l)
+                case .onedrive: r = try await OneDrive.list(l)
+                case .pcloud: r = try await PCloud.list(l)
+                }
                 guard link.trimmingCharacters(in: .whitespacesAndNewlines) == l else { busy = false; return }
                 previewTitle = r.rootName
                 preview = r.files.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
@@ -934,6 +1175,11 @@ final class Manager: NSObject, ObservableObject {
                 if let direct { urls.append(direct) }
                 if let fresh = try? await Yandex.resolve(publicKey: k, path: p), !urls.contains(fresh) { urls.append(fresh) }
             case .google(let id): urls = Google.downloadURLs(id); rename = dest.pathExtension.isEmpty
+            case .dropbox(let u): urls = [URL(string: u)!]
+            case .wetransfer(let id, let h, let r, let fid): urls = [try await WeTransfer.resolve(id: id, hash: h, recipient: r, fileID: fid)]
+            case .mailru(let w): urls = [try await MailRu.resolve(w)]
+            case .onedrive(let t, let id): urls = [try await OneDrive.resolve(token: t, itemID: id)]
+            case .pcloud(let api, let c, let fid): urls = [try await PCloud.resolve(api: api, code: c, fileID: fid)]
             }
             if urls.isEmpty { throw LoaderError.parse(L("не удалось получить ссылку на скачивание", "couldn't get a download link")) }
             let saved = try await downloadFile(urls: urls, dest: dest, renameFromServer: rename, raw: j.raw, fid: f.id, knownSize: f.size, conns: conns)
@@ -1060,7 +1306,7 @@ struct Pill: View {
 
 struct ProviderBadge: View {
     let p: Provider
-    var body: some View { Pill(text: p == .yandex ? L("Яндекс", "Yandex") : "Google", color: p == .yandex ? .yellow : Color(red: 0.5, green: 0.7, blue: 1)) }
+    var body: some View { Pill(text: p.short, color: p.color) }
 }
 
 struct SectionHeader: View {
@@ -1387,7 +1633,7 @@ struct DownloadPage: View {
                 Card {
                     HStack(spacing: 10) {
                         Image(systemName: "link").foregroundStyle(Theme.dim)
-                        TextField(L("Ссылка на Яндекс Диск или Google Диск", "Link to a cloud drive"), text: $m.link)
+                        TextField(L("Ссылка на облачный диск", "Link to a cloud drive"), text: $m.link)
                             .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.text).onSubmit { m.check() }
                         Divider().frame(height: 22)
                         Button { if let s = NSPasteboard.general.string(forType: .string) { m.link = s; m.check() } } label: { Label(L("Вставить", "Paste"), systemImage: "doc.on.clipboard") }
@@ -1484,7 +1730,7 @@ struct HistoryRow: View {
             }
             HStack(spacing: 8) {
                 Text(h.title).font(.system(size: 14).italic()).foregroundStyle(Theme.text).lineLimit(2)
-                Pill(text: h.provider == Provider.yandex.rawValue ? L("Яндекс", "Yandex") : "Google")
+                if let pv = Provider(rawValue: h.provider) { ProviderBadge(p: pv) } else { Pill(text: h.provider) }
                 statePill
             }
             HStack(spacing: 16) {
@@ -1668,6 +1914,21 @@ struct SettingsPage: View {
     }
 }
 
+/// значки в строку с переносом
+struct FlowRow: Layout {
+    var spacing: CGFloat = 6
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let w = proposal.width ?? 600; var x: CGFloat = 0, y: CGFloat = 0, h: CGFloat = 0
+        for v in subviews { let s = v.sizeThatFits(.unspecified); if x + s.width > w, x > 0 { x = 0; y += h + spacing; h = 0 }; x += s.width + spacing; h = max(h, s.height) }
+        return CGSize(width: w, height: y + h)
+    }
+    func placeSubviews(in b: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = b.minX, y = b.minY, h: CGFloat = 0
+        for v in subviews { let s = v.sizeThatFits(.unspecified); if x + s.width > b.maxX, x > b.minX { x = b.minX; y += h + spacing; h = 0 }
+            v.place(at: CGPoint(x: x, y: y), proposal: .unspecified); x += s.width + spacing; h = max(h, s.height) }
+    }
+}
+
 struct AboutPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1675,9 +1936,15 @@ struct AboutPage: View {
             Card {
                 VStack(alignment: .leading, spacing: 8) {
                     Logo(size: 26)
-                    Text(L("Скачивание по публичным ссылкам Яндекс Диска и Google Диска. Работает автономно, без нейросетей.", "Download files and folders directly from cloud drive links. Works on its own, no AI involved."))
+                    Text(L("Скачивание файлов и папок напрямую по ссылке с облачных дисков. Работает автономно, без нейросетей.", "Download files and folders directly from cloud drive links. Works on its own, no AI involved."))
                         .font(.system(size: 13)).foregroundStyle(Theme.dim)
                     Text(L("Версия ", "Version ") + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).font(.system(size: 12)).foregroundStyle(Theme.dim)
+                    Text(L("Поддерживаемые сервисы", "Supported services")).font(.system(size: 11, weight: .semibold)).kerning(1)
+                        .foregroundStyle(Theme.dim).padding(.top, 10)
+                    FlowRow(spacing: 6) { ForEach(Provider.allCases, id: \.self) { ProviderBadge(p: $0) } }
+                    Text(L("Работает с публичными ссылками — «доступ для всех, у кого есть ссылка». Папки Dropbox скачиваются одним архивом.",
+                           "Works with public links (\u{201c}anyone with the link\u{201d}). Dropbox folders download as a single archive."))
+                        .font(.system(size: 11)).foregroundStyle(Theme.dim.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
                 }.padding(18)
             }
             Spacer()

@@ -15,6 +15,9 @@ Paste a link — see what's inside — pick what you need — download. No brows
 - updates itself
 - English and Russian interface
 
+**Works with:** Yandex Disk · Google Drive · Dropbox · WeTransfer · Mail.ru Cloud · OneDrive · pCloud
+<sub>Public links only (“anyone with the link”). Dropbox folders download as a single archive.</sub>
+
 ## Download
 
 **macOS 14+** · Apple Silicon & Intel → [latest release](../../releases/latest)

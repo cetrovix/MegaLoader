@@ -4,7 +4,7 @@
 #   ./build.sh release    → ещё и dist/DiskLoader-<версия>.zip для GitHub Releases
 set -e
 cd "$(dirname "$0")"
-VER=1.5
+VER=1.6
 OUT="build.noindex/DiskLoader.app"
 rm -rf build.noindex; mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 for a in arm64 x86_64; do
