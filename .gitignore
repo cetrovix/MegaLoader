@@ -1,0 +1,5 @@
+build.noindex/
+dist/
+icon/make_icon
+.DS_Store
+icon/make_dmg_bg
