@@ -561,6 +561,18 @@ enum Net {
 
 // MARK: - Медиа: видео и музыка с площадок (движок yt-dlp + ffmpeg, качаются при первом использовании)
 
+/// карточка видео/трека в списке «к скачиванию» (ссылки копятся, у каждой своё качество и своя кнопка)
+struct PendingMedia: Identifiable {
+    let id = UUID()
+    let link: String
+    let provider: Provider
+    var info: MediaInfo
+    var file: RemoteFile
+    var quality: String
+    var loading = true
+    var userPicked = false            // человек сам выбрал качество — полный разбор его не трогает
+}
+
 struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = [] }
 
 enum Media {
@@ -722,15 +734,33 @@ enum Media {
     }
     static func clean(_ s: String) -> String { safeName(s).replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
 
+    /// мгновенное превью (~0,2 с): название и обложка через oEmbed, пока движок разбирает ролик целиком
+    static func quick(_ link: String, music: Bool) async -> (ListResult, MediaInfo)? {
+        let l = link.lowercased()
+        if l.contains("list=") || l.contains("/playlist") || l.contains("/sets/") || l.contains("spotify") { return nil }
+        let ep: String, site: String
+        if l.contains("youtube.com") || l.contains("youtu.be") { ep = "https://www.youtube.com/oembed?format=json&url="; site = l.contains("music.youtube") ? "YouTube Music" : "YouTube" }
+        else if l.contains("soundcloud.com") { ep = "https://soundcloud.com/oembed?format=json&url="; site = "SoundCloud" }
+        else if l.contains("vimeo.com") { ep = "https://vimeo.com/api/oembed.json?url="; site = "Vimeo" }
+        else if l.contains("tiktok.com/@") { ep = "https://www.tiktok.com/oembed?url="; site = "TikTok" }
+        else { return nil }
+        var r = URLRequest(url: URL(string: ep + (link.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? link))!, timeoutInterval: 4)
+        r.setValue(UA, forHTTPHeaderField: "User-Agent")
+        guard let (d, resp) = try? await URLSession.shared.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200,
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let t = j["title"] as? String, !t.isEmpty else { return nil }
+        let title = clean(t)
+        let f = RemoteFile(relPath: title, size: nil, source: .media(url: link, quality: music ? "audio" : "2160", site: site))
+        return (ListResult(rootName: "", files: [f], skipped: []),
+                MediaInfo(title: title, site: site, duration: nil, thumb: (j["thumbnail_url"] as? String).flatMap(URL.init(string:)), isPlaylist: false))
+    }
+
     /// что по ссылке: одно видео/трек или плейлист
     static func list(_ link: String, music: Bool, status: @escaping (String) -> Void) async throws -> (ListResult, MediaInfo) {
         if link.contains("spotify") { return try await Spotify.list(link) }
         try await ensure(status)
         status(L("Читаю ссылку…", "Reading the link…"))
         let h = host(link)
-        if let name = Net.blockedName(link), !Net.vpnOn {
-            status(L("Читаю ссылку… Если ты в России — \(name) работает только через VPN", "Reading the link… If you're in Russia, \(name) only works through a VPN"))
-        }
+        // про VPN говорим только при реальном сбое — если сервис отдал ролик, никаких предупреждений
         let args = ["-J", "--flat-playlist", "--no-warnings", "--socket-timeout", "15"] + cookieArgs() + [link]
         var r = try await run(args, sys: preferSys.contains(h), timeout: 25)
         // обходной путь нужен, когда VPN есть, но движок его «не видит»; без VPN повтор только тянет время
@@ -783,11 +813,12 @@ enum Media {
                     "--socket-timeout", "20", "--retries", "3", "--fragment-retries", "5",
                     "--progress-template", "download:DLP|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
                     "--print", "after_move:FINAL|%(filepath)s",
-                    "-P", dir.path, "-o", name + ".%(ext)s", "--ffmpeg-location", ffmpeg.path] + cookieArgs()
+                    "-P", dir.path, "-o", ".megaloader-\(fid.uuidString).%(ext)s", "--ffmpeg-location", ffmpeg.path] + cookieArgs()
         if quality == "audio" { args += ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"] }
         else {
             args += ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--concurrent-fragments", "8",
-                     "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
+                     "--remux-video", "mp4",
+                     "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",hdr:sdr,vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
         }
         let p = Process(); p.executableURL = sys && FileManager.default.isExecutableFile(atPath: ytdlpSys.path) ? ytdlpSys : ytdlp; p.arguments = args
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
@@ -827,11 +858,83 @@ enum Media {
             if Net.isNetError(errText) { throw LoaderError.parse("NET|" + errText) }   // наверху решат: повтор запасным путём
             throw LoaderError.parse(errorText(errText, link: url))
         }
-        let out = final.map { URL(fileURLWithPath: $0) } ?? dir.appendingPathComponent(name)
+        var tmpOut = final.map { URL(fileURLWithPath: $0) } ?? dir.appendingPathComponent(".megaloader-\(fid.uuidString).mp4")
+        if quality != "audio" { tmpOut = try await makeCompatible(tmpOut, raw: raw) }   // правило: открывается везде — иначе не отдаём файл
+        let out = dir.appendingPathComponent(name + "." + tmpOut.pathExtension)
+        if FileManager.default.fileExists(atPath: out.path) { _ = try FileManager.default.replaceItemAt(out, withItemAt: tmpOut) }
+        else { try FileManager.default.moveItem(at: tmpOut, to: out) }
         // итоговый размер — по самому файлу (если ролик уже был скачан, прогресса от yt-dlp нет)
         let sz = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? raw.snapshot().0
         raw.setBytes(fid, max(sz, 1), expected: max(sz, 1))
         return out
+    }
+}
+
+extension Media {
+    /// Правило: видео с площадок — всегда H.264 + AAC в MP4. Открывается на Mac и Windows, в DaVinci Resolve и Premiere Pro.
+    /// Если уже H.264 + AAC — ничего не делаем (быстро). VP9/AV1/HEVC → H.264 на видеокарте (VideoToolbox), звук → AAC.
+    static func makeCompatible(_ file: URL, raw: Raw) async throws -> URL {
+        func ff(_ args: [String], onLine: ((String) -> Void)? = nil) async -> (String, Int32) {
+            await withCheckedContinuation { c in
+                let p = Process(); p.executableURL = ffmpeg; p.arguments = args
+                let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
+                o.fileHandleForReading.readabilityHandler = { h in
+                    let d = h.availableData; if d.isEmpty { return }
+                    String(decoding: d, as: UTF8.self).split(separator: "\n").forEach { onLine?(String($0)) }
+                }
+                DispatchQueue.global().async {
+                    do { try p.run() } catch { c.resume(returning: ("", -1)); return }
+                    let ed = e.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                    o.fileHandleForReading.readabilityHandler = nil
+                    c.resume(returning: (String(decoding: ed, as: UTF8.self), p.terminationStatus))
+                }
+            }
+        }
+        let (info, _) = await ff(["-hide_banner", "-i", file.path])
+        let lines = info.split(separator: "\n").map(String.init)
+        let vline = lines.first { $0.contains("Video:") }?.lowercased() ?? ""
+        let aline = lines.first { $0.contains("Audio:") }?.lowercased() ?? ""
+        let vOK = vline.isEmpty || vline.contains("video: h264")
+        let aOK = aline.isEmpty || aline.contains("audio: aac")
+        let pixOK = vline.isEmpty || vline.contains("yuv420p,") || vline.contains("yuv420p(")
+        if vOK && aOK && pixOK && file.pathExtension.lowercased() == "mp4" { return file }
+        var dur = 0.0
+        if let r = info.range(of: #"Duration: (\d+):(\d+):(\d+\.?\d*)"#, options: .regularExpression) {
+            let parts = info[r].replacingOccurrences(of: "Duration: ", with: "").split(separator: ":").compactMap { Double($0) }
+            if parts.count == 3 { dur = parts[0] * 3600 + parts[1] * 60 + parts[2] }
+        }
+        // битрейт H.264 ≈ 2,2 × исходного VP9/AV1, но не ниже порога для разрешения
+        let h = Int(vline.range(of: #"\d{3,4}x(\d{3,4})"#, options: .regularExpression).map { String(vline[$0].split(separator: "x").last ?? "0") } ?? "0") ?? 0
+        let srcKbps = Double(vline.range(of: #"(\d+) kb/s"#, options: .regularExpression).map { String(vline[$0].split(separator: " ").first ?? "0") } ?? "0") ?? 0
+        let floorM: Double = h >= 2000 ? 25 : h >= 1400 ? 16 : h >= 1000 ? 10 : h >= 700 ? 6 : 4
+        let capM: Double = h >= 2000 ? 60 : h >= 1400 ? 35 : 20
+        let vbM = min(capM, max(floorM, srcKbps / 1000 * 2.2))
+        var args = ["-hide_banner", "-v", "error", "-y", "-i", file.path, "-map", "0:v:0?", "-map", "0:a:0?"]
+        if vOK && pixOK { args += ["-c:v", "copy"] }
+        else { args += ["-c:v", "h264_videotoolbox", "-b:v", "\(Int(vbM))M", "-maxrate", "\(Int(vbM * 1.4))M", "-bufsize", "\(Int(vbM * 2))M",
+                        "-profile:v", "high", "-pix_fmt", "yuv420p", "-tag:v", "avc1"] }
+        args += aOK ? ["-c:a", "copy"] : ["-c:a", "aac", "-b:a", "256k"]
+        let tmp = file.deletingLastPathComponent().appendingPathComponent(".megaloader-conv-" + UUID().uuidString + ".mp4")
+        args += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", tmp.path]
+        log("МЕДИА: делаю совместимым \(file.lastPathComponent): \(vOK ? "видео как есть" : "видео → H.264 \(Int(vbM)) Мбит/с (видеокарта)"), \(aOK ? "звук как есть" : "звук → AAC")")
+        raw.note = L("Делаю совместимым с Mac и Windows…", "Making it play on Mac and Windows…")
+        let (err, code) = await ff(args) { line in
+            if line.hasPrefix("out_time_ms="), dur > 0, let us = Double(line.dropFirst(12)) {
+                raw.note = L("Делаю совместимым с Mac и Windows… ", "Making it play on Mac and Windows… ") + "\(min(99, Int(us / 1_000_000 / dur * 100))) %"
+            }
+        }
+        raw.note = ""
+        guard code == 0, FileManager.default.fileExists(atPath: tmp.path) else {
+            try? FileManager.default.removeItem(at: tmp)
+            log("МЕДИА: перекодирование не удалось: \(err.suffix(300))")
+            throw LoaderError.parse(L("Не удалось сделать файл совместимым — подробности в Журнале", "Couldn't make the file compatible \u{2014} see the Log"))
+        }
+        try? FileManager.default.removeItem(at: file)
+        let outURL = file.deletingPathExtension().appendingPathExtension("mp4")
+        try? FileManager.default.removeItem(at: outURL)
+        try FileManager.default.moveItem(at: tmp, to: outURL)
+        log("МЕДИА: готово — H.264 + AAC, открывается на Mac, Windows, в DaVinci и Premiere")
+        return outURL
     }
 }
 
@@ -909,6 +1012,7 @@ struct HistoryItem: Codable, Identifiable {
     var seconds: Double? = nil
     var bookmark: Data? = nil
     var site: String? = nil
+    var file: String? = nil          // если скачан один файл — его путь
 }
 enum History {
     static let url: URL = {
@@ -932,6 +1036,8 @@ final class Raw: @unchecked Sendable {
     func add(_ f: UUID, _ n: Int64) { lock.lock(); bytes[f, default: 0] += n; lock.unlock() }
     func addResumed(_ f: UUID, _ n: Int64) { lock.lock(); bytes[f, default: 0] += n; resumed += n; lock.unlock() }
     func reset(_ f: UUID) { lock.lock(); bytes[f] = 0; lock.unlock() }
+    private var _note = ""
+    var note: String { get { lock.lock(); defer { lock.unlock() }; return _note } set { lock.lock(); _note = newValue; lock.unlock() } }
     func setBytes(_ f: UUID, _ n: Int64, expected e: Int64) { lock.lock(); bytes[f] = n; if e > 0 { expected[f] = e }; lock.unlock() }
     func bytesOf(_ f: UUID) -> Int64 { lock.lock(); defer { lock.unlock() }; return bytes[f] ?? 0 }
     func track(_ t: URLSessionTask) -> Bool { lock.lock(); defer { lock.unlock() }; if cancelled { t.cancel(); return false }; tasks.append(t); tasks.removeAll { $0.state == .completed }; return true }
@@ -1183,9 +1289,11 @@ final class Job: ObservableObject, Identifiable {
     @Published var speed: Double = 0
     @Published var fileProgress: [UUID: Double] = [:]
     @Published var current: String = ""
+    @Published var note: String = ""          // этап: «перекодирую для QuickTime… 42%»
     let raw = Raw()
     var completed: Set<UUID> = []          // файлы, скачанные целиком — при продолжении не трогаем
     var runTask: Task<Void, Never>? = nil
+    @Published var saved: [UUID: String] = [:]   // id файла → путь на диске (имя могло поменяться: расширение, сервер)
     var gen = 0                              // номер запуска: старый запуск не трогает состояние нового
     var started = Date()
     var lastBytes: Int64 = 0
@@ -1206,16 +1314,17 @@ final class Job: ObservableObject, Identifiable {
         lastBytes = net; bytesDone = now
         if files.allSatisfy({ $0.size == nil }) { expected = exp }
         if prog != fileProgress { fileProgress = prog }
+        let n = raw.note; if n != note { note = n }
     }
 }
 
 // MARK: - Сохранение очереди между запусками
 
-struct JobRecord: Codable { let id: UUID; let link: String; let provider: Provider; let title: String; let files: [RemoteFile]; let base: URL; let state: Job.State; var completed: Set<UUID>? = nil; var bookmark: Data? = nil }
+struct JobRecord: Codable { let id: UUID; let link: String; let provider: Provider; let title: String; let files: [RemoteFile]; let base: URL; let state: Job.State; var completed: Set<UUID>? = nil; var bookmark: Data? = nil; var saved: [UUID: String]? = nil }
 enum QueueStore {
     static let url = History.url.deletingLastPathComponent().appendingPathComponent("queue.json")
     @MainActor static func save(_ jobs: [Job]) {
-        let recs = jobs.map { JobRecord(id: $0.id, link: $0.link, provider: $0.provider, title: $0.title, files: $0.files, base: $0.base, state: $0.state, completed: $0.completed, bookmark: $0.bookmark) }
+        let recs = jobs.map { JobRecord(id: $0.id, link: $0.link, provider: $0.provider, title: $0.title, files: $0.files, base: $0.base, state: $0.state, completed: $0.completed, bookmark: $0.bookmark, saved: $0.saved) }
         try? JSONEncoder().encode(recs).write(to: url, options: .atomic)
     }
     static func load() -> [JobRecord] { (try? JSONDecoder().decode([JobRecord].self, from: Data(contentsOf: url))) ?? [] }
@@ -1235,7 +1344,11 @@ final class Manager: NSObject, ObservableObject {
     @Published var busy = false
     @Published var selected: Set<UUID> = []      // выбранные файлы
     @Published var cwd: [String] = []             // текущая папка в браузере
-    @Published var media: MediaInfo? = nil        // превью видео/трека
+    @Published var media: MediaInfo? = nil        // превью плейлиста
+    @Published var pending: [PendingMedia] = []   // карточки видео/треков — копятся, пока не скачаешь
+    @Published var checkedLink = ""               // ссылка, к которой относится список выбора (поле можно менять)
+    private var checkSeq = 0
+    private var inFlight = 0 { didSet { busy = inFlight > 0 } }
     @AppStorage("mediaQuality") var mediaQuality = "2160"
     // очередь
     @Published var jobs: [Job] = []
@@ -1246,7 +1359,7 @@ final class Manager: NSObject, ObservableObject {
     @Published var update: (version: String, url: URL, zip: URL?)? = nil
     @Published var updateProgress: Double? = nil     // nil — не качаем; 0…1 — загрузка обновления
     @Published var updateNote = ""
-    static let defaultRepo = "rxtxrxr/MegaLoader"
+    static let defaultRepo = "cetrovix/MegaLoader"
     private var activity: NSObjectProtocol?
 
     var perJob: Int { max(1, UserDefaults.standard.integer(forKey: "perJob").nonZero ?? 4) }
@@ -1272,6 +1385,7 @@ final class Manager: NSObject, ObservableObject {
                 j.state = (r.state == .running) ? .waiting : r.state
                 j.completed = r.completed ?? []
                 j.bookmark = r.bookmark
+                j.saved = r.saved ?? [:]
                 j.doneCount = j.completed.count
                 for f in j.files where j.completed.contains(f.id) { if let sz = f.size { j.raw.setExpected(f.id, sz); j.raw.addResumed(f.id, sz) } }
                 j.tick(0.25); j.speed = 0
@@ -1328,11 +1442,47 @@ final class Manager: NSObject, ObservableObject {
     func check() {
         let l = link.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !l.isEmpty else { return }
-        guard let p = detect(l) else { status = LoaderError.badLink.localizedDescription; provider = nil; preview = []; return }
-        provider = p; busy = true; preview = []; skipped = []; media = nil
+        guard let p = detect(l) else { status = LoaderError.badLink.localizedDescription; return }
+        if pending.contains(where: { $0.link == l }) { link = ""; return }      // уже в списке
+        checkSeq += 1; let seq = checkSeq
+        inFlight += 1
         status = L("Читаю содержимое \(p.title)…", "Reading \(p.title)…")
         Task {
+            defer { inFlight -= 1 }
             do {
+                if p.category != .drive {
+                    // видео/музыка: мгновенная карточка, поле сразу свободно под следующую ссылку
+                    var pid: UUID? = nil
+                    if let (qr, qi) = await Media.quick(l, music: p == .music), let f = qr.files.first {
+                        let card = PendingMedia(link: l, provider: p, info: qi, file: f, quality: p == .music ? "audio" : "2160")
+                        pending.append(card); pid = card.id
+                        if link.trimmingCharacters(in: .whitespacesAndNewlines) == l { link = "" }
+                        status = L("Добавлено — можно вставлять следующую ссылку", "Added \u{2014} paste the next link")
+                    }
+                    let (res, info) = try await Media.list(l, music: p == .music) { st in Task { @MainActor in if pid == nil { self.status = st } } }
+                    if info.isPlaylist {
+                        if let pid { pending.removeAll { $0.id == pid } }
+                        guard seq == checkSeq || preview.isEmpty else { return }
+                        showPicker(res, link: l, provider: p, info: info)
+                        if link.trimmingCharacters(in: .whitespacesAndNewlines) == l { link = "" }
+                        return
+                    }
+                    let q = p == .music ? "audio" : (info.heights.first.map(String.init) ?? "2160")
+                    if let pid, let i = pending.firstIndex(where: { $0.id == pid }) {
+                        pending[i].info = info; pending[i].loading = false
+                        if !pending[i].userPicked { pending[i].quality = q }
+                        else if let want = Int(pending[i].quality), let hs = info.heights.first, !info.heights.contains(want) {
+                            pending[i].quality = String(info.heights.first { $0 <= want } ?? hs)   // выбранного нет — ближайшее ниже
+                        }
+                        if let f = res.files.first { pending[i].file = RemoteFile(id: pending[i].file.id, relPath: f.relPath, size: f.size, source: f.source) }
+                    } else if pid == nil, let f = res.files.first {
+                        pending.append(PendingMedia(link: l, provider: p, info: info, file: f, quality: q, loading: false))
+                        if link.trimmingCharacters(in: .whitespacesAndNewlines) == l { link = "" }
+                    }
+                    log("ПРОВЕРКА \(p.rawValue): \(l) → «\(info.title)» (\(info.site))")
+                    status = L("Добавлено — можно вставлять следующую ссылку", "Added \u{2014} paste the next link")
+                    return
+                }
                 let r: ListResult
                 switch p {
                 case .yandex: r = try await Yandex.list(l)
@@ -1342,25 +1492,42 @@ final class Manager: NSObject, ObservableObject {
                 case .mailru: r = try await MailRu.list(l)
                 case .onedrive: r = try await OneDrive.list(l)
                 case .pcloud: r = try await PCloud.list(l)
-                case .video, .music:
-                    let (res, info) = try await Media.list(l, music: p == .music) { st in Task { @MainActor in self.status = st } }
-                    r = res; media = info
-                    if p == .video { mediaQuality = info.heights.first.map(String.init) ?? "2160" }
+                default: return
                 }
-                guard link.trimmingCharacters(in: .whitespacesAndNewlines) == l else { busy = false; return }
-                previewTitle = r.rootName
-                preview = r.files.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
-                skipped = r.skipped
-                selected = []; cwd = []
-                log("ПРОВЕРКА \(p.rawValue): \(l) → «\(r.rootName)», файлов \(preview.count), \(fmtBytes(previewSize)), пропущено \(skipped.count)")
-                if let mi = media, p.category != .drive {
-                    status = mi.isPlaylist ? L("Плейлист: \(preview.count)", "Playlist: \(preview.count)") + " · " + mi.site : mi.site + (mi.duration.map { " · " + fmtDur($0) } ?? "")
-                } else {
-                status = preview.isEmpty ? L("Файлов не найдено", "No files found") :
-                    L("Файлов: \(preview.count)", "Files: \(preview.count)") + (previewSize > 0 ? " · \(fmtBytes(previewSize))" : "")
-                }
-            } catch { status = human(error); log("ОШИБКА проверки \(l): \(error.localizedDescription)") }
-            busy = false
+                guard seq == checkSeq else { return }      // пока читали, проверили другую ссылку на диск — показываем последнюю
+                showPicker(r, link: l, provider: p, info: nil)
+            } catch {
+                pending.removeAll { $0.link == l }
+                status = human(error); log("ОШИБКА проверки \(l): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// список выбора (диск или плейлист) — привязан к своей ссылке, а не к полю ввода
+    private func showPicker(_ r: ListResult, link l: String, provider p: Provider, info: MediaInfo?) {
+        provider = p; checkedLink = l; media = info
+        previewTitle = r.rootName
+        preview = r.files.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
+        skipped = r.skipped; selected = []; cwd = []
+        if p == .video, let info { mediaQuality = info.heights.first.map(String.init) ?? "2160" }
+        log("ПРОВЕРКА \(p.rawValue): \(l) → «\(r.rootName)», файлов \(preview.count), \(fmtBytes(previewSize)), пропущено \(skipped.count)")
+        if let mi = info { status = L("Плейлист: \(preview.count)", "Playlist: \(preview.count)") + " · " + mi.site }
+        else {
+            status = preview.isEmpty ? L("Файлов не найдено", "No files found") :
+                L("Файлов: \(preview.count)", "Files: \(preview.count)") + (previewSize > 0 ? " · \(fmtBytes(previewSize))" : "")
+        }
+    }
+
+    /// скачать карточку из списка видео/треков
+    func downloadPending(_ id: UUID) {
+        guard !enqueuing, let c = pending.first(where: { $0.id == id }) else { return }
+        enqueuing = true
+        let f: RemoteFile
+        if case .media(let u, _, let site) = c.file.source { f = RemoteFile(id: c.file.id, relPath: c.file.relPath, size: nil, source: .media(url: u, quality: c.quality, site: site)) } else { f = c.file }
+        log("НАЖАТО «Скачать» (карточка): \(c.info.title)")
+        DispatchQueue.main.async {
+            if self.enqueue([f], link: c.link, p: c.provider, previewTitle: "", preview: [f], quality: c.quality) { self.pending.removeAll { $0.id == id } }
+            self.enqueuing = false
         }
     }
 
@@ -1376,13 +1543,19 @@ final class Manager: NSObject, ObservableObject {
     }
     func addToQueue(_ chosen: [RemoteFile]) {
         guard !enqueuing else { log("НАЖАТО «Скачать» повторно — игнорирую"); return }
-        let snap = (link: link.trimmingCharacters(in: .whitespacesAndNewlines), provider: provider, title: previewTitle, preview: preview)
+        let snap = (link: checkedLink, provider: provider, title: previewTitle, preview: preview)
         guard let p = snap.provider, !snap.link.isEmpty, !chosen.isEmpty else { log("НАЖАТО «Скачать», но нечего скачивать"); return }
         enqueuing = true
         log("НАЖАТО «Скачать»: \(chosen.count) файлов")
-        DispatchQueue.main.async { self.enqueue(chosen, link: snap.link, p: p, previewTitle: snap.title, preview: snap.preview); self.enqueuing = false }
+        DispatchQueue.main.async {
+            if self.enqueue(chosen, link: snap.link, p: p, previewTitle: snap.title, preview: snap.preview, quality: self.mediaQuality) {
+                self.preview = []; self.skipped = []; self.provider = nil; self.previewTitle = ""; self.selected = []; self.cwd = []; self.media = nil; self.checkedLink = ""
+            }
+            self.enqueuing = false
+        }
     }
-    private func enqueue(_ chosen: [RemoteFile], link: String, p: Provider, previewTitle: String, preview: [RemoteFile]) {
+    @discardableResult
+    private func enqueue(_ chosen: [RemoteFile], link: String, p: Provider, previewTitle: String, preview: [RemoteFile], quality: String) -> Bool {
         let ud = UserDefaults.standard
         let def = ud.string(forKey: "defaultDir").map { URL(fileURLWithPath: $0) }
         let ask = ud.object(forKey: "askEachTime") as? Bool ?? true
@@ -1390,36 +1563,25 @@ final class Manager: NSObject, ObservableObject {
         var chosen = chosen
         // видео/трек одним файлом + «Спрашивать имя файла»: системное окно с выделенным оригинальным названием
         let askName = ud.bool(forKey: "askMediaName") && p.category != .drive && previewTitle.isEmpty && chosen.count == 1
-        let ext = (p == .music || mediaQuality == "audio") ? "mp3" : "mp4"
+        let ext = (p == .music || quality == "audio") ? "mp3" : "mp4"
         var newName: String? = nil
         if askName, let f = chosen.first {
-            if ask || def == nil || !FileManager.default.fileExists(atPath: def!.path) {
-                let sp = NSSavePanel()
-                sp.canCreateDirectories = true; sp.isExtensionHidden = false
-                sp.title = L("Сохранить как", "Save as"); sp.prompt = L("Скачать", "Download")
-                sp.message = L("Куда скачать и как назвать файл?", "Where to download and what to name the file?")
-                sp.nameFieldStringValue = f.relPath + "." + ext          // macOS сам выделяет имя без расширения
-                sp.directoryURL = lastDir ?? def
-                NSApp.activate(ignoringOtherApps: true)
-                guard sp.runModal() == .OK, let u = sp.url else { log("  сохранение отменено"); return }
-                dir = u.deletingLastPathComponent(); newName = u.deletingPathExtension().lastPathComponent
-            } else {
-                dir = def!
-                let a = NSAlert()
-                a.messageText = L("Как назвать файл?", "Name the file")
-                a.informativeText = L("Можно напечатать или вставить своё название.", "Type or paste your own name.")
-                a.addButton(withTitle: L("Скачать", "Download")); a.addButton(withTitle: L("Отмена", "Cancel")).keyEquivalent = "\u{1b}"   // Escape = отмена
-                let field = NSTextField(string: f.relPath); field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
-                let extLabel = NSTextField(labelWithString: "." + ext); extLabel.textColor = .secondaryLabelColor
-                let row = NSStackView(views: [field, extLabel]); row.orientation = .horizontal; row.spacing = 4
-                row.frame = NSRect(x: 0, y: 0, width: 360, height: 24); a.accessoryView = row
-                a.window.initialFirstResponder = field
-                NSApp.activate(ignoringOtherApps: true)
-                DispatchQueue.main.async { field.selectText(nil) }
-                guard a.runModal() == .alertFirstButtonReturn else { log("  ввод имени отменён"); return }
-                let t = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                newName = t.isEmpty ? f.relPath : t
-            }
+            // классическое окно сохранения macOS (шторкой из заголовка): имя выделено без расширения, «Заменить?» — системное
+            let sp = NSSavePanel()
+            sp.canCreateDirectories = true; sp.isExtensionHidden = false; sp.showsTagField = false
+            sp.prompt = L("Скачать", "Download")
+            sp.message = L("Как назвать файл и куда положить?", "Name the file and choose where to save it")
+            sp.nameFieldStringValue = f.relPath + "." + ext
+            let startDir = (!ask && def != nil && FileManager.default.fileExists(atPath: def!.path)) ? def : (lastDir ?? def)
+            sp.directoryURL = startDir
+            NSApp.activate(ignoringOtherApps: true)
+            let res: NSApplication.ModalResponse
+            if let w = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeKey }) {
+                sp.beginSheetModal(for: w) { NSApp.stopModal(withCode: $0) }
+                res = NSApp.runModal(for: sp)
+            } else { res = sp.runModal() }
+            guard res == .OK, let u = sp.url else { log("  сохранение отменено"); return false }
+            dir = u.deletingLastPathComponent(); newName = u.deletingPathExtension().lastPathComponent
             if let n = newName {
                 let clean = safeName(n.hasSuffix("." + ext) ? String(n.dropLast(ext.count + 1)) : n)
                 chosen = [RemoteFile(id: f.id, relPath: clean, size: f.size, source: f.source)]
@@ -1432,7 +1594,7 @@ final class Manager: NSObject, ObservableObject {
             panel.prompt = L("Скачать сюда", "Download here"); panel.message = L("Куда положить скачанное?", "Where should the files go?")
             panel.directoryURL = lastDir ?? def
             NSApp.activate(ignoringOtherApps: true)
-            guard panel.runModal() == .OK, let u = panel.url else { log("  выбор папки отменён"); return }
+            guard panel.runModal() == .OK, let u = panel.url else { log("  выбор папки отменён"); return false }
             dir = u
         }
         lastDir = dir
@@ -1441,11 +1603,11 @@ final class Manager: NSObject, ObservableObject {
         let base = (previewTitle.isEmpty || !rootFolder) ? dir : dir.appendingPathComponent(safeName(previewTitle))
         let part = chosen.count == preview.count ? "" : L(" (выбрано \(chosen.count) из \(preview.count))", " (\(chosen.count) of \(preview.count) selected)")
         if p == .video { chosen = chosen.map { f in
-            if case .media(let u, _, let site) = f.source { return RemoteFile(id: f.id, relPath: f.relPath, size: f.size, source: .media(url: u, quality: mediaQuality, site: site)) }
+            if case .media(let u, _, let site) = f.source { return RemoteFile(id: f.id, relPath: f.relPath, size: f.size, source: .media(url: u, quality: quality, site: site)) }
             return f } }
         let key = Set(chosen.map(\.relPath))
         if jobs.contains(where: { $0.base.standardizedFileURL == base.standardizedFileURL && !key.isDisjoint(with: $0.files.map(\.relPath)) && [.running, .waiting].contains($0.state) }) {
-            status = L("Эти файлы уже качаются в эту папку — дубль не добавлен", "These files are already downloading to this folder — duplicate skipped"); log("  дубль не добавлен: \(link) → \(base.path)"); return
+            status = L("Эти файлы уже качаются в эту папку — дубль не добавлен", "These files are already downloading to this folder — duplicate skipped"); log("  дубль не добавлен: \(link) → \(base.path)"); return false
         }
         let job = Job(link: link, provider: p, title: title + part, files: chosen, base: base)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -1454,9 +1616,10 @@ final class Manager: NSObject, ObservableObject {
         chosen.forEach { log("   • \($0.relPath)") }
         jobs.insert(job, at: 0); QueueStore.save(jobs)
         // поле свободно под следующую ссылку
-        self.link = ""; self.preview = []; skipped = []; self.provider = nil; self.previewTitle = ""; selected = []; cwd = []
+        if self.link.trimmingCharacters(in: .whitespacesAndNewlines) == link { self.link = "" }
         status = L("Добавлено в очередь. Можно вставлять следующую ссылку", "Added to the queue. You can paste the next link")
         pump()
+        return true
     }
 
     func pump() {
@@ -1514,6 +1677,50 @@ final class Manager: NSObject, ObservableObject {
         resume(j)
     }
 
+    /// кнопка с папкой: один файл — выделить его в Finder; папка/много файлов — открыть папку задачи изнутри
+    /// уведомление внизу окна (папку/файл удалили и т.п.)
+    @Published var notice: String? = nil
+    func notify(_ text: String) {
+        withAnimation { notice = text }
+        let t = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { if self.notice == t { withAnimation { self.notice = nil } } }
+    }
+    /// найти один скачанный файл: по запомненному пути, по имени с типовыми расширениями, по закладке перенесённой папки
+    static func locateFile(saved: String?, base: URL, rel: String, bookmark: Data?) -> URL? {
+        let fm = FileManager.default
+        if let s = saved, fm.fileExists(atPath: s) { return URL(fileURLWithPath: s) }
+        var bases = [base]
+        if let b = bookmark { var st = false; if let u = try? URL(resolvingBookmarkData: b, bookmarkDataIsStale: &st), !u.path.contains("/.Trash") { bases.append(u) } }
+        let name = saved.map { URL(fileURLWithPath: $0).lastPathComponent } ?? rel
+        for b in bases {
+            for cand in [name, rel, rel + ".mp4", rel + ".mp3", rel + ".m4a", rel + ".webm", rel + ".mkv"] {
+                let u = b.appendingPathComponent(cand); if fm.fileExists(atPath: u.path) { return u }
+            }
+        }
+        return nil
+    }
+    /// найти папку: на месте или перенесённую (по закладке)
+    static func locateFolder(_ base: URL, bookmark: Data?) -> URL? {
+        var d: ObjCBool = false
+        if FileManager.default.fileExists(atPath: base.path, isDirectory: &d), d.boolValue { return base }
+        if let b = bookmark { var st = false
+            if let u = try? URL(resolvingBookmarkData: b, bookmarkDataIsStale: &st), !u.path.contains("/.Trash"), FileManager.default.fileExists(atPath: u.path) { return u } }
+        return nil
+    }
+    func reveal(_ j: Job) {
+        if j.files.count == 1, let f = j.files.first {
+            if let u = Manager.locateFile(saved: j.saved[f.id], base: j.base, rel: f.relPath, bookmark: j.bookmark) {
+                NSWorkspace.shared.activateFileViewerSelecting([u]); return
+            }
+            notify(L("Файл «\(f.relPath)» перемещён или удалён.", "\u{201c}\(f.relPath)\u{201d} was moved or deleted.")); return
+        }
+        openFolder(j.base, bookmark: j.bookmark)
+    }
+    func openFolder(_ u: URL, bookmark: Data? = nil) {
+        if let f = Manager.locateFolder(u, bookmark: bookmark) { NSWorkspace.shared.open(f) }
+        else { notify(L("Папка «\(u.lastPathComponent)» перемещена или удалена.", "The folder \u{201c}\(u.lastPathComponent)\u{201d} was moved or deleted.")) }
+    }
+
     /// продолжить с того места, где встали: готовые файлы пропускаем, недокачанный докачиваем
     func resume(_ j: Job) {
         if !ensureFolder(j) { return }
@@ -1567,9 +1774,9 @@ final class Manager: NSObject, ObservableObject {
             if j.folderProblem != nil { j.state = .stopped }
             if j.state != .stopped { history.insert(HistoryItem(date: Date(), title: j.title, provider: j.provider.rawValue, link: j.link, path: j.base.path,
                                        files: j.doneCount, total: j.files.count, bytes: j.bytesDone, state: "\(j.state)",
-                                       seconds: Date().timeIntervalSince(j.started), bookmark: j.bookmark ?? (try? j.base.bookmarkData()), site: siteOf(j.files)), at: 0)
+                                       seconds: Date().timeIntervalSince(j.started), bookmark: j.bookmark ?? (try? j.base.bookmarkData()), site: siteOf(j.files), file: j.files.count == 1 ? j.files.first.flatMap { j.saved[$0.id] } : nil), at: 0)
             History.save(history) }
-            if j.state == .done, UserDefaults.standard.object(forKey: "revealDone") as? Bool ?? false { NSWorkspace.shared.activateFileViewerSelecting([j.base]) }
+            if j.state == .done, UserDefaults.standard.object(forKey: "revealDone") as? Bool ?? false { reveal(j) }
             keepAwake(); QueueStore.save(jobs)
             log("КОНЕЦ «\(j.title)»: \(j.state), скачано \(j.doneCount)/\(j.files.count), \(fmtBytes(j.bytesDone)), ошибок \(j.failed.count)")
             pump()
@@ -1597,12 +1804,14 @@ final class Manager: NSObject, ObservableObject {
             case .pcloud(let api, let c, let fid): urls = [try await PCloud.resolve(api: api, code: c, fileID: fid)]
             case .media(let u, let q, _):
                 let saved = try await Media.download(url: u, quality: q, dir: dest.deletingLastPathComponent(), name: dest.lastPathComponent, raw: j.raw, fid: f.id)
+                j.saved[f.id] = saved.path
                 j.completed.insert(f.id); j.doneCount = j.completed.count; QueueStore.save(jobs)
                 log("  ✓ \(f.relPath) → \(saved.path)")
                 return
             }
             if urls.isEmpty { throw LoaderError.parse(L("не удалось получить ссылку на скачивание", "couldn't get a download link")) }
             let saved = try await downloadFile(urls: urls, dest: dest, renameFromServer: rename, raw: j.raw, fid: f.id, knownSize: f.size, conns: conns)
+            j.saved[f.id] = saved.path
             j.completed.insert(f.id); j.doneCount = j.completed.count
             QueueStore.save(jobs)
             log("  ✓ \(f.relPath) → \(saved.path) (\(fmtBytes(j.raw.bytesOf(f.id))))")
@@ -1751,7 +1960,8 @@ struct PinkButton: View {
     let title: String; var icon: String? = nil; let action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) { if let icon { Image(systemName: icon) }; Text(title) }
+            HStack(spacing: 6) { if let icon { Image(systemName: icon) }; Text(title).lineLimit(1) }
+                .fixedSize()
                 .font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                 .padding(.horizontal, 16).padding(.vertical, 8)
                 .background(Theme.pink, in: RoundedRectangle(cornerRadius: 10))
@@ -1866,7 +2076,7 @@ func siteOf(_ files: [RemoteFile]) -> String? {
 }
 
 struct QualityPicker: View {
-    @ObservedObject var m: Manager
+    @Binding var value: String
     var heights: [Int] = []          // пусто — плейлист: общий набор «до …»
     static func label(_ h: Int) -> String { h == 2160 ? "4K" : h == 1440 ? "2K" : "\(h)p" }
     var options: [(String, String, String)] {
@@ -1876,8 +2086,8 @@ struct QualityPicker: View {
     var body: some View {
         HStack(spacing: 2) {
             ForEach(options, id: \.0) { o in
-                let on = m.mediaQuality == o.0
-                Button { withAnimation(.easeInOut(duration: 0.15)) { m.mediaQuality = o.0 } } label: {
+                let on = value == o.0
+                Button { withAnimation(.easeInOut(duration: 0.15)) { value = o.0 } } label: {
                     Text(L(o.1, o.2)).lineLimit(1).fixedSize().font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(on ? Color.white : Theme.dim).padding(.horizontal, 9).padding(.vertical, 5)
                         .background(on ? Theme.pink : Color.clear, in: Capsule())
@@ -1889,28 +2099,34 @@ struct QualityPicker: View {
 
 struct MediaCard: View {
     @ObservedObject var m: Manager
-    let info: MediaInfo
+    @Binding var c: PendingMedia
     var body: some View {
         Card {
             HStack(alignment: .top, spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10).fill(Theme.row)
-                    if let t = info.thumb {
+                    if let t = c.info.thumb {
                         AsyncImage(url: t) { img in img.resizable().scaledToFill() } placeholder: { ProgressView().controlSize(.small) }
-                    } else { Image(systemName: m.provider == .music ? "music.note" : "play.rectangle.fill").font(.system(size: 30)).foregroundStyle(Theme.dim) }
-                }.frame(width: 180, height: 101).clipShape(RoundedRectangle(cornerRadius: 10))
+                    } else { Image(systemName: c.provider == .music ? "music.note" : "play.rectangle.fill").font(.system(size: 30)).foregroundStyle(Theme.dim) }
+                }.frame(width: 160, height: 90).clipShape(RoundedRectangle(cornerRadius: 10))
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(info.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(2)
+                    HStack(alignment: .top) {
+                        Text(c.info.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(2)
+                        Spacer(minLength: 8)
+                        Button { withAnimation { m.pending.removeAll { $0.id == c.id } } } label: { Image(systemName: "xmark.circle") }
+                            .buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Убрать из списка", "Remove from the list"))
+                    }
                     HStack(spacing: 8) {
-                        Pill(text: info.site, color: (m.provider ?? .video).color)
-                        if let d = info.duration { Label(fmtDur(d), systemImage: "clock").font(.system(size: 12)).foregroundStyle(Theme.dim) }
+                        Pill(text: c.info.site, color: c.provider.color)
+                        if let d = c.info.duration { Label(fmtDur(d), systemImage: "clock").font(.system(size: 12)).foregroundStyle(Theme.dim) }
+                        if c.loading { ProgressView().controlSize(.mini); Text(L("уточняю качество…", "checking quality…")).font(.system(size: 11)).foregroundStyle(Theme.dim) }
                     }
                     Spacer(minLength: 0)
                     HStack(spacing: 10) {
-                        if m.provider == .video { QualityPicker(m: m, heights: info.heights) }
+                        if c.provider == .video { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights) }
                         else { Label(L("MP3, лучшее качество", "MP3, best quality"), systemImage: "music.note").font(.system(size: 12)).foregroundStyle(Theme.dim) }
                         Spacer(minLength: 8)
-                        PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.addToQueue(m.preview) }.keyboardShortcut(.defaultAction)
+                        PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.downloadPending(c.id) }
                     }
                 }
             }.padding(14)
@@ -2000,7 +2216,7 @@ struct PickerFooter: View {
         let sel = m.selectedFiles; let sz = sel.compactMap(\.size).reduce(0, +)
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                if m.provider == .video { QualityPicker(m: m) }
+                if m.provider == .video { QualityPicker(value: $m.mediaQuality) }
                 Text(sel.isEmpty ? L("Ничего не выбрано", "Nothing selected") : L("Выбрано \(sel.count)", "\(sel.count) selected") + (sz > 0 ? " · " + fmtBytes(sz) : ""))
                     .font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(1)
                 Spacer(minLength: 8)
@@ -2042,7 +2258,7 @@ struct JobRow: View {
                     Button { m.stop(j) } label: { Image(systemName: "pause.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help(L("Пауза", "Pause"))
                 } else {
                     if j.state != .done { Button { m.resume(j) } label: { Image(systemName: "play.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help(L("Продолжить с места остановки", "Resume where it stopped")) }
-                    Button { NSWorkspace.shared.activateFileViewerSelecting([j.base]) } label: { Image(systemName: "folder") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Показать в Finder", "Show in Finder"))
+                    Button { m.reveal(j) } label: { Image(systemName: "folder") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Показать в Finder", "Show in Finder"))
                 }
                 Button { m.remove(j) } label: { Image(systemName: "xmark.circle") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Убрать задачу (скачанное останется)", "Remove task (downloaded files stay)"))
             }.font(.system(size: 15))
@@ -2050,7 +2266,10 @@ struct JobRow: View {
             HStack(spacing: 16) {
                 Label(L("\(j.doneCount) из \(j.files.count)", "\(j.doneCount) of \(j.files.count)"), systemImage: "doc.on.doc")
                 Label(fmtBytes(j.bytesDone) + (j.expected > 0 ? L(" из ", " of ") + fmtBytes(j.expected) : ""), systemImage: "internaldrive")
-                if j.state == .running { Label(fmtBytes(Int64(j.speed)) + L("/с", "/s"), systemImage: "speedometer").foregroundStyle(Theme.pink) }
+                if j.state == .running {
+                    if !j.note.isEmpty { Label(j.note, systemImage: "wand.and.stars").foregroundStyle(Theme.pink) }
+                    else { Label(fmtBytes(Int64(j.speed)) + L("/с", "/s"), systemImage: "speedometer").foregroundStyle(Theme.pink) }
+                }
                 Spacer()
                 Button(open ? L("Скрыть файлы", "Hide files") : L("Файлы", "Files")) { open.toggle() }.buttonStyle(.tap).foregroundStyle(Theme.dim)
             }.font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.dim).monospacedDigit()
@@ -2077,16 +2296,50 @@ struct JobRow: View {
                 }.font(.system(size: 12)).padding(10).background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
             if open {
-                ForEach(j.files) { f in
-                    HStack(spacing: 8) {
-                        Image(systemName: fileIcon(f.relPath)).frame(width: 14).foregroundStyle(Theme.dim)
-                        Text(f.relPath).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        if let p = j.fileProgress[f.id] {
-                            if p >= 1 { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                            else if p >= 0 { Text("\(Int(p * 100))%").foregroundStyle(Theme.pink).monospacedDigit() } else { ProgressView().controlSize(.mini) }
-                        }
-                    }.font(.system(size: 11))
+                // путь: каждая часть открывает свою папку (куда скачивали → папка задачи)
+                HStack(spacing: 4) {
+                    Image(systemName: "folder").foregroundStyle(Theme.dim)
+                    let comps = Array(j.base.pathComponents.suffix(3))
+                    ForEach(Array(comps.enumerated()), id: \.offset) { i, c in
+                        if i > 0 { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(Theme.dim) }
+                        Button(c) {
+                            var u = j.base; for _ in 0..<(comps.count - 1 - i) { u = u.deletingLastPathComponent() }
+                            m.openFolder(u)
+                        }.buttonStyle(.tap).foregroundStyle(i == comps.count - 1 ? Theme.text : Theme.dim).lineLimit(1)
+                    }
+                    Spacer()
+                }.font(.system(size: 11, weight: .medium)).padding(.bottom, 2)
+                // папки верхнего уровня — по одной строке, клик открывает именно её
+                let tops = Dictionary(grouping: j.files.filter { $0.relPath.contains("/") }) { String($0.relPath.split(separator: "/").first!) }
+                ForEach(tops.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }, id: \.self) { name in
+                    let fs = tops[name] ?? []; let done = fs.filter { j.completed.contains($0.id) }.count
+                    Button { m.openFolder((Manager.locateFolder(j.base, bookmark: j.bookmark) ?? j.base).appendingPathComponent(safeName(name))) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "folder.fill").frame(width: 14).foregroundStyle(Theme.pinkSoft)
+                            Text(name).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                            Text(L("\(done) из \(fs.count)", "\(done) of \(fs.count)")).foregroundStyle(Theme.dim).monospacedDigit()
+                            Spacer()
+                            if done == fs.count { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                            Image(systemName: "arrow.up.forward.square").foregroundStyle(Theme.dim)
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.tap).font(.system(size: 11)).help(L("Открыть папку", "Open folder"))
+                }
+                // файлы в корне — клик выделяет файл в Finder
+                ForEach(j.files.filter { !$0.relPath.contains("/") }) { f in
+                    Button {
+                        if let u = Manager.locateFile(saved: j.saved[f.id], base: j.base, rel: f.relPath, bookmark: j.bookmark) { NSWorkspace.shared.activateFileViewerSelecting([u]) }
+                        else { m.notify(L("Файл «\(f.relPath)» перемещён или удалён.", "\u{201c}\(f.relPath)\u{201d} was moved or deleted.")) }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: fileIcon(f.relPath)).frame(width: 14).foregroundStyle(Theme.dim)
+                            Text(f.relPath).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            if let p = j.fileProgress[f.id] {
+                                if p >= 1 { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                                else if p >= 0 { Text("\(Int(p * 100))%").foregroundStyle(Theme.pink).monospacedDigit() } else { ProgressView().controlSize(.mini) }
+                            }
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.tap).font(.system(size: 11)).help(L("Показать в Finder", "Show in Finder"))
                 }
             }
         }
@@ -2120,7 +2373,7 @@ struct DownloadPage: View {
                         Button { if let s = NSPasteboard.general.string(forType: .string) { m.link = s; m.check() } } label: { Label(L("Вставить", "Paste"), systemImage: "doc.on.clipboard") }
                             .buttonStyle(.tap).foregroundStyle(Theme.dim)
                         Button { m.check() } label: { Label(L("Проверить", "Check"), systemImage: "magnifyingglass") }
-                            .buttonStyle(.tap).foregroundStyle(m.link.isEmpty ? Theme.dim.opacity(0.5) : Theme.text).disabled(m.busy || m.link.isEmpty)
+                            .buttonStyle(.tap).foregroundStyle(m.link.isEmpty ? Theme.dim.opacity(0.5) : Theme.text).disabled(m.link.isEmpty)
                     }.padding(16)
                     Divider().overlay(Theme.line)
                     HStack(spacing: 8) {
@@ -2129,8 +2382,8 @@ struct DownloadPage: View {
                         Text(m.status).font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(2)
                     }.padding(.horizontal, 16).padding(.vertical, 10)
                 }
-                if let mi = m.media, !mi.isPlaylist, !m.preview.isEmpty { MediaCard(m: m, info: mi) }
-                else if !m.preview.isEmpty { PickerView(m: m, listMax: max(120, min(460, geo.size.height - 360))) }
+                ForEach($m.pending) { $c in MediaCard(m: m, c: $c).transition(.opacity.combined(with: .move(edge: .top))) }
+                if !m.preview.isEmpty { PickerView(m: m, listMax: max(120, min(460, geo.size.height - 360))) }
                 HStack {
                     Text(L("ЗАГРУЗКИ", "DOWNLOADS")).font(.system(size: 11, weight: .semibold)).kerning(1).foregroundStyle(Theme.dim)
                     if m.summary.speed > 0 { Text(fmtBytes(Int64(m.summary.speed)) + L("/с", "/s")).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.pink).monospacedDigit() }
@@ -2220,8 +2473,14 @@ struct HistoryRow: View {
             HStack(alignment: .center) {
                 Text(ruDate.string(from: h.date)).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
                 Spacer()
-                IconBtn(icon: "folder", help: exists ? L("Показать в Finder", "Show in Finder") : L("Папки нет на месте", "Folder is missing"), disabled: !exists) {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: h.path)]) }
+                IconBtn(icon: "folder", help: L("Показать в Finder", "Show in Finder")) {
+                    let base = URL(fileURLWithPath: h.path)
+                    if h.total == 1 {
+                        let rel = h.file.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent } ?? h.title
+                        if let u = Manager.locateFile(saved: h.file, base: base, rel: rel, bookmark: h.bookmark) { NSWorkspace.shared.activateFileViewerSelecting([u]) }
+                        else { m.notify(L("Файл «\(rel)» перемещён или удалён.", "\u{201c}\(rel)\u{201d} was moved or deleted.")) }
+                    } else { m.openFolder(base, bookmark: h.bookmark) }
+                }
                 IconBtn(icon: "doc.on.doc", help: L("Скопировать ссылку", "Copy link")) {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(h.link, forType: .string) }
                 IconBtn(icon: "arrow.counterclockwise", help: L("Открыть ссылку снова", "Open the link again"), color: Theme.pink) { m.link = h.link; m.page = .download; m.check() }
@@ -2254,7 +2513,7 @@ struct HistoryRow: View {
                     Button(to) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: to)]) }.buttonStyle(.tap).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.head)
                 } else {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(L("Папка перемещена или удалена с устройства", "Folder was moved or deleted from this Mac")).foregroundStyle(.orange)
+                    Text(L("Папка перемещена или удалена", "Folder was moved or deleted")).foregroundStyle(.orange)
                     Text(h.path).foregroundStyle(Theme.dim.opacity(0.6)).lineLimit(1).truncationMode(.head).strikethrough()
                 }
             }.font(.system(size: 11))
@@ -2390,6 +2649,21 @@ struct SettingsPage: View {
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
                 Card {
+                    SectionHeader(text: L("Видео и музыка", "Video and music"))
+                    SettingRow(title: L("Спрашивать имя файла", "Ask for a file name"),
+                               sub: askMediaName ? L("Перед скачиванием видео или трека — окно с оригинальным названием, выделенным для замены", "Before each video or track \u{2014} a dialog with the original name selected for editing")
+                                                 : L("Файл называется как на площадке", "The file keeps its original name from the site")) {
+                        Toggle("", isOn: $askMediaName).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
+                    }.padding(.horizontal, 10)
+                    SettingRow(title: L("Вход через браузер", "Sign in via browser"),
+                               sub: L("Для роликов, которые площадка показывает только после входа (часть Instagram, TikTok, YouTube 18+). Приложение возьмёт вход из выбранного браузера. По умолчанию выключено.",
+                                      "For videos a site only shows after sign-in (some Instagram, TikTok, YouTube 18+). The app uses your sign-in from the chosen browser. Off by default.")) {
+                        Picker("", selection: $cookiesBrowser) {
+                            Text(L("Выключено", "Off")).tag(""); Text("Chrome").tag("chrome"); Text("Safari").tag("safari"); Text("Firefox").tag("firefox"); Text("Arc").tag("arc")
+                        }.labelsHidden().frame(width: 140)
+                    }.padding(.horizontal, 10).padding(.bottom, 10)
+                }
+                Card {
                     SectionHeader(text: L("Скорость", "Speed"))
                     VStack(spacing: 8) {
                         SettingRow(title: L("Файлов одновременно", "Files at once"), sub: L("В одной задаче. Больше — быстрее на мелких файлах", "Per task. More is faster for small files")) {
@@ -2407,31 +2681,10 @@ struct SettingsPage: View {
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
                 Card {
-                    SectionHeader(text: L("Видео и музыка", "Video and music"))
-                    SettingRow(title: L("Спрашивать имя файла", "Ask for a file name"),
-                               sub: askMediaName ? L("Перед скачиванием видео или трека — окно с оригинальным названием, выделенным для замены", "Before each video or track \u{2014} a dialog with the original name selected for editing")
-                                                 : L("Файл называется как на площадке", "The file keeps its original name from the site")) {
-                        Toggle("", isOn: $askMediaName).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
-                    }.padding(.horizontal, 10)
-                    SettingRow(title: L("Вход через браузер", "Sign in via browser"),
-                               sub: L("Для роликов, которые площадка показывает только после входа (часть Instagram, TikTok, YouTube 18+). Приложение возьмёт вход из выбранного браузера. По умолчанию выключено.",
-                                      "For videos a site only shows after sign-in (some Instagram, TikTok, YouTube 18+). The app uses your sign-in from the chosen browser. Off by default.")) {
-                        Picker("", selection: $cookiesBrowser) {
-                            Text(L("Выключено", "Off")).tag(""); Text("Chrome").tag("chrome"); Text("Safari").tag("safari"); Text("Firefox").tag("firefox"); Text("Arc").tag("arc")
-                        }.labelsHidden().frame(width: 140)
-                    }.padding(.horizontal, 10).padding(.bottom, 10)
-                }
-                Card {
-                    SectionHeader(text: L("Запасные пути и обновления", "Fallbacks and updates"))
+                    SectionHeader(text: L("Запасные пути", "Fallbacks"))
                     VStack(spacing: 8) {
                         SettingRow(title: L("Ключ Google API (необязательно)", "Google API key (optional)"), sub: L("Если Google изменит публичные страницы — приложение пойдёт через официальный Drive API. Ключ бесплатный: console.cloud.google.com → Drive API → Credentials", "If Google changes its public pages, the app will use the official Drive API. The key is free: console.cloud.google.com → Drive API → Credentials")) {
                             SecureField("AIza…", text: $googleKey).textFieldStyle(.roundedBorder).frame(width: 200)
-                        }
-                        SettingRow(title: L("Обновления", "Updates"), sub: L("Приложение само проверяет новые версии на GitHub (\(Manager.defaultRepo)) и предлагает обновиться внизу окна", "The app checks GitHub (\(Manager.defaultRepo)) for new versions and offers to update at the bottom of the window")) {
-                            HStack {
-                                TextField(Manager.defaultRepo, text: $ghRepo).textFieldStyle(.roundedBorder).frame(width: 170)
-                                GhostButton(title: L("Проверить", "Check")) { Task { await m.checkUpdate(manual: true) }; m.page = .download }
-                            }
                         }
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
@@ -2517,7 +2770,8 @@ struct Logo: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.down.circle.fill").font(.system(size: size * 0.95, weight: .semibold)).foregroundStyle(Theme.pink)
-            Text("MegaLoader").font(.system(size: size, weight: .semibold, design: .rounded)).foregroundStyle(Theme.text)
+            // логотип: Baskerville SemiBold, чуть сжатое межбуквенное расстояние
+            Text("MegaLoader").font(.custom("Baskerville-SemiBold", size: size * 1.12)).tracking(-size * 0.027).foregroundStyle(Theme.text)
                 .minimumScaleFactor(0.6)
         }.lineLimit(1)
     }
@@ -2626,6 +2880,20 @@ struct ContentView: View {
                 if !m.updateNote.isEmpty && m.updateProgress == nil { Text(m.updateNote).foregroundStyle(.orange).lineLimit(1); Text("·").foregroundStyle(Theme.dim) }
                 Text("v" + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).foregroundStyle(Theme.dim)
             }.font(.system(size: 12)).padding(.horizontal, 16).padding(.vertical, 9).background(Theme.side)
+        }
+        .overlay(alignment: .bottom) {
+            if let n = m.notice {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(n).font(.system(size: 13)).foregroundStyle(Theme.text).fixedSize(horizontal: false, vertical: true)
+                    Button { withAnimation { m.notice = nil } } label: { Image(systemName: "xmark") }.buttonStyle(.tap).foregroundStyle(Theme.dim)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12).frame(maxWidth: 560)
+                .background(Theme.card, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.5)).allowsHitTesting(false))
+                .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+                .padding(.bottom, 52).transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         .frame(minWidth: 780, minHeight: 640)
         .preferredColorScheme(.dark)
