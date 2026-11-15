@@ -25,16 +25,17 @@ struct RemoteFile: Identifiable, Hashable, Codable {
 }
 
 enum Provider: String, Codable, CaseIterable {
-    case yandex = "Яндекс Диск", google = "Google Диск", dropbox = "Dropbox", wetransfer = "WeTransfer",
+    case google = "Google Диск", yandex = "Яндекс Диск", dropbox = "Dropbox", wetransfer = "WeTransfer",
          mailru = "Облако Mail.ru", onedrive = "OneDrive", pcloud = "pCloud",
-         video = "Видео", music = "Музыка"
-    enum Category: String { case drive, video, music }
-    var category: Category { self == .video ? .video : self == .music ? .music : .drive }
+         video = "Видео", music = "Музыка", stream = "Стримы"
+    enum Category: String { case drive, video, music, stream }
+    var category: Category { self == .video ? .video : self == .music ? .music : self == .stream ? .stream : .drive }
+    var isVideo: Bool { self == .video || self == .stream }   // видео и записи стримов: выбор качества, H.264
     static var drives: [Provider] { allCases.filter { $0.category == .drive } }
     var title: String {
         switch self {
         case .yandex: L("Яндекс Диск", "Yandex Disk"); case .google: L("Google Диск", "Google Drive")
-        case .mailru: L("Облако Mail.ru", "Mail.ru Cloud"); case .video: L("Видео", "Video"); case .music: L("Музыка", "Music"); default: rawValue
+        case .mailru: L("Облако Mail.ru", "Mail.ru Cloud"); case .video: L("Видео", "Video"); case .music: L("Музыка", "Music"); case .stream: L("Стримы", "Streams"); default: rawValue
         }
     }
     var color: Color {
@@ -48,10 +49,11 @@ enum Provider: String, Codable, CaseIterable {
         case .pcloud: Color(red: 0.35, green: 0.85, blue: 0.75)
         case .video: Color(red: 1, green: 0.45, blue: 0.4)
         case .music: Color(red: 0.4, green: 0.85, blue: 0.5)
+        case .stream: Color(red: 0.66, green: 0.5, blue: 1)
         }
     }
     var short: String {
-        switch self { case .yandex: L("Яндекс", "Yandex"); case .google: "Google"; case .mailru: "Mail.ru"; case .video: L("Видео", "Video"); case .music: L("Музыка", "Music"); default: rawValue }
+        switch self { case .yandex: L("Яндекс", "Yandex"); case .google: "Google"; case .mailru: "Mail.ru"; case .video: L("Видео", "Video"); case .music: L("Музыка", "Music"); case .stream: L("Стримы", "Streams"); default: rawValue }
     }
 }
 
@@ -122,6 +124,21 @@ func fetch(_ url: URL) async throws -> Data {
     return d
 }
 
+/// запись прошедшего стрима (Twitch VOD) — отдельная вкладка «Стримы»
+func isStreamLink(_ link: String) -> Bool {
+    let l = link.lowercased()
+    return l.contains("twitch.tv/videos/") || l.range(of: #"twitch\.tv/[^/]+/v/\d"#, options: .regularExpression) != nil
+}
+/// время «1:10:00», «70:00», «4200» → секунды
+func parseTime(_ t: String) -> Double? {
+    let p = t.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ".", with: ":").split(separator: ":", omittingEmptySubsequences: false)
+    guard !p.isEmpty, p.count <= 3 else { return nil }
+    var s = 0.0
+    for x in p { guard let v = Double(x), v >= 0 else { return nil }; s = s * 60 + v }
+    return s
+}
+func fmtClock(_ s: Double) -> String { let i = Int(s); return i >= 3600 ? String(format: "%d:%02d:%02d", i / 3600, i % 3600 / 60, i % 60) : String(format: "%d:%02d", i / 60, i % 60) }
+
 func detect(_ link: String) -> Provider? {
     let l = link.lowercased()
     if l.contains("disk.yandex") || l.contains("yadi.sk") || l.contains("disk.360.yandex") { return .yandex }
@@ -132,6 +149,7 @@ func detect(_ link: String) -> Provider? {
     if l.contains("1drv.ms") || l.contains("onedrive.live.com") || l.contains("sharepoint.com") { return .onedrive }
     if l.contains("pcloud.link") || l.contains("pcloud.com") { return .pcloud }
     if l.hasPrefix("http://") || l.hasPrefix("https://") || l.contains(".") && !l.contains(" ") {
+        if isStreamLink(l) { return .stream }
         return Media.musicHosts.contains { l.contains($0) } ? .music : .video
     }
     return nil
@@ -549,7 +567,7 @@ enum Net {
         ("instagram.com", "Instagram"), ("facebook.com", "Facebook"), ("fb.watch", "Facebook"), ("x.com", "X (Twitter)"),
         ("twitter.com", "X (Twitter)"), ("tiktok.com", "TikTok"), ("linkedin.com", "LinkedIn"), ("discord", "Discord"),
         ("soundcloud.com", "SoundCloud"), ("vimeo.com", "Vimeo"), ("patreon.com", "Patreon"), ("dailymotion.com", "Dailymotion"),
-        ("tumblr.com", "Tumblr"), ("spotify", "Spotify"), ("threads.net", "Threads")]
+        ("tumblr.com", "Tumblr"), ("spotify", "Spotify"), ("threads.net", "Threads"), ("twitch.tv", "Twitch")]
     static func blockedName(_ link: String) -> String? { let l = link.lowercased(); return blockedRU.first { l.contains($0.0) }?.1 }
     static func needsVPN(_ link: String) -> Bool { blockedName(link) != nil }
     static func isNetError(_ t: String) -> Bool {
@@ -571,9 +589,25 @@ struct PendingMedia: Identifiable {
     var quality: String
     var loading = true
     var userPicked = false            // человек сам выбрал качество — полный разбор его не трогает
+    var from = "", to = ""            // стримы: отрывок по времени (пусто — с начала / до конца)
+    /// отрезок в секундах; nil — весь ролик; ошибка — текстом
+    func range() -> (Double, Double)?? {
+        let a = from.trimmingCharacters(in: .whitespaces), b = to.trimmingCharacters(in: .whitespaces)
+        if a.isEmpty && b.isEmpty { return .some(nil) }
+        let s = a.isEmpty ? 0 : parseTime(a), e = b.isEmpty ? (info.duration ?? 0) : parseTime(b)
+        guard let s, let e, e > s, info.duration.map({ s < $0 }) ?? true else { return nil }
+        return .some((s, min(e, info.duration ?? e)))
+    }
+    /// примерный размер скачиваемого (с учётом отрывка)
+    var estBytes: Int64? {
+        guard let h = Int(quality), let full = info.sizes[h] else { return nil }
+        if case .some(.some(let r)) = range(), let d = info.duration, d > 0 { return Int64(Double(full) * (r.1 - r.0) / d) }
+        return full
+    }
 }
 
 struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = []
+    var sizes: [Int: Int64] = [:]   // примерный размер файла по ступеням (для проверки места на диске)
     var slow: [Int: Double] = [:]   // ступени без H.264 у этого ролика → примерное время перекодирования, с
 }
 
@@ -806,8 +840,23 @@ enum Media {
             let dur = j["duration"] as? Double ?? 0
             slow[st] = dur * fps * w * Double(st) / 8.0e8   // видеокарта M-серии: ~110 кадров/с в 4K (замер), с запасом
         }
+        // примерный размер: лучший по битрейту вариант ступени + звук
+        var sizes: [Int: Int64] = [:]
+        let dur0 = j["duration"] as? Double ?? 0
+        func fsize(_ f: [String: Any]) -> Double {
+            (f["filesize"] as? Double) ?? (f["filesize_approx"] as? Double) ?? (f["filesize"] as? Int).map(Double.init) ?? (f["filesize_approx"] as? Int).map(Double.init)
+                ?? (f["tbr"] as? Double).map { $0 * 125 * dur0 } ?? 0
+        }
+        let aBest = (j["formats"] as? [[String: Any]] ?? []).filter { ($0["vcodec"] as? String) == "none" && ($0["acodec"] as? String ?? "none") != "none" }.map(fsize).max() ?? 0
+        for st in steps {
+            let at = vfs.filter { f in std.first { $0 <= Int(Double(f["height"] as? Int ?? 0) * 1.05) } == st && (f["vcodec"] as? String ?? "") != "none" }
+            guard let best = at.max(by: { ($0["tbr"] as? Double ?? 0) < ($1["tbr"] as? Double ?? 0) }) else { continue }
+            let hasAudio = (best["acodec"] as? String ?? "none") != "none"
+            let v = fsize(best) + (hasAudio ? 0 : aBest)
+            if v > 0 { sizes[st] = Int64(v) }
+        }
         let f = RemoteFile(relPath: title, size: nil, source: .media(url: (j["webpage_url"] as? String) ?? link, quality: q, site: site))
-        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps, slow: slow))
+        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps, sizes: sizes, slow: slow))
     }
 
     /// скачать одно видео/трек; прогресс — в raw, пауза — остановкой процесса (докачка через .part)
@@ -822,7 +871,12 @@ enum Media {
         }
         catch LoaderError.parse(let msg) where msg.hasPrefix("NET|") { throw LoaderError.parse(errorText(String(msg.dropFirst(4)), link: url)) }
     }
-    static func downloadOnce(url: String, quality: String, dir: URL, name: String, raw: Raw, fid: UUID, sys: Bool) async throws -> URL {
+    static func downloadOnce(url: String, quality qualityFull: String, dir: URL, name: String, raw: Raw, fid: UUID, sys: Bool) async throws -> URL {
+        // «1080|600-780» — качество и отрывок в секундах (стримы)
+        let qp = qualityFull.split(separator: "|", maxSplits: 1).map(String.init)
+        let quality = qp.first ?? qualityFull
+        let section: (Double, Double)? = qp.count == 2 ? {
+            let t = qp[1].split(separator: "-").compactMap { Double($0) }; return t.count == 2 ? (t[0], t[1]) : nil }() : nil
         var args = [url, "--no-playlist", "--newline", "--no-warnings", "--progress", "-c",
                     "--socket-timeout", "20", "--retries", "3", "--fragment-retries", "5",
                     "--progress-template", "download:DLP|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
@@ -834,7 +888,11 @@ enum Media {
                      "--remux-video", "mp4",
                      "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",hdr:sdr,vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
         }
+        // --print глушит вывод ffmpeg; --no-quiet возвращает его строки прогресса (отрывок качает ffmpeg)
+        if let section { args += ["--download-sections", "*\(Int(section.0))-\(Int(section.1))", "--no-quiet"] }
         let p = Process(); p.executableURL = sys && FileManager.default.isExecutableFile(atPath: ytdlpSys.path) ? ytdlpSys : ytdlp; p.arguments = args
+        // ffmpeg из сборки не знает системных сертификатов — без этого отрывки стримов (HLS через ffmpeg) не качаются
+        var env = ProcessInfo.processInfo.environment; env["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"; p.environment = env
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
         var final: String? = nil; var errText = ""
         var phaseBase: Int64 = 0, lastD: Int64 = 0, lastT: Int64 = 0
@@ -855,7 +913,24 @@ enum Media {
                 } else if line.hasPrefix("FINAL|") { final = String(line.dropFirst(6)) }
             }
         }
-        e.fileHandleForReading.readabilityHandler = { h in let d = h.availableData; if !d.isEmpty { lock.lock(); errText += String(decoding: d, as: UTF8.self); lock.unlock() } }
+        let secLen = section.map { $0.1 - $0.0 } ?? 0
+        e.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData; if d.isEmpty { return }
+            let txt = String(decoding: d, as: UTF8.self)
+            // отрывок качает ffmpeg: прогресс — из его строк «size=… time=…»
+            if secLen > 0, let tr = txt.range(of: #"time=(\d+):(\d+):(\d+\.?\d*)"#, options: [.regularExpression, .backwards]) {
+                let t = txt[tr].dropFirst(5).split(separator: ":").compactMap { Double($0) }
+                let kb = txt.range(of: #"size=\s*(\d+)KiB"#, options: [.regularExpression, .backwards]).flatMap { Double(txt[$0].filter(\.isNumber)) } ?? 0
+                if t.count == 3 {
+                    let sec = t[0] * 3600 + t[1] * 60 + t[2], got = Int64(kb * 1024)
+                    lock.lock(); lastActivity = Date(); lastD = got; lastT = 0
+                    if sec > 1 { raw.setBytes(fid, got, expected: max(got, Int64(Double(got) * secLen / sec))) }
+                    lock.unlock()
+                }
+                return
+            }
+            lock.lock(); errText += txt; lock.unlock()
+        }
         try p.run()
         await withTaskCancellationHandler {
             while p.isRunning {
@@ -1523,7 +1598,7 @@ final class Manager: NSObject, ObservableObject {
         previewTitle = r.rootName
         preview = r.files.sorted { $0.relPath.localizedStandardCompare($1.relPath) == .orderedAscending }
         skipped = r.skipped; selected = []; cwd = []
-        if p == .video, let info { mediaQuality = info.heights.first.map(String.init) ?? "2160" }
+        if p.isVideo, let info { mediaQuality = info.heights.first.map(String.init) ?? "2160" }
         log("ПРОВЕРКА \(p.rawValue): \(l) → «\(r.rootName)», файлов \(preview.count), \(fmtBytes(previewSize)), пропущено \(skipped.count)")
         if let mi = info { status = L("Плейлист: \(preview.count)", "Playlist: \(preview.count)") + " · " + mi.site }
         else {
@@ -1536,11 +1611,20 @@ final class Manager: NSObject, ObservableObject {
     func downloadPending(_ id: UUID) {
         guard !enqueuing, let c = pending.first(where: { $0.id == id }) else { return }
         enqueuing = true
+        guard let r = c.range() else {
+            status = L("Проверь время отрывка: «с» должно быть раньше «до» и внутри стрима", "Check the clip times: «from» must be before «to» and inside the stream")
+            enqueuing = false; return
+        }
+        var q = c.quality, name = c.file.relPath
+        if let r {   // отрывок: время — в качестве (для движка) и в имени файла (чтобы отрывки одного стрима не перезаписывали друг друга)
+            q += "|\(Int(r.0))-\(Int(r.1))"
+            name += " (" + fmtClock(r.0).replacingOccurrences(of: ":", with: ".") + "–" + fmtClock(r.1).replacingOccurrences(of: ":", with: ".") + ")"
+        }
         let f: RemoteFile
-        if case .media(let u, _, let site) = c.file.source { f = RemoteFile(id: c.file.id, relPath: c.file.relPath, size: nil, source: .media(url: u, quality: c.quality, site: site)) } else { f = c.file }
-        log("НАЖАТО «Скачать» (карточка): \(c.info.title)")
+        if case .media(let u, _, let site) = c.file.source { f = RemoteFile(id: c.file.id, relPath: name, size: nil, source: .media(url: u, quality: q, site: site)) } else { f = c.file }
+        log("НАЖАТО «Скачать» (карточка): \(c.info.title)" + (r.map { " — отрывок \(fmtClock($0.0))–\(fmtClock($0.1))" } ?? ""))
         DispatchQueue.main.async {
-            if self.enqueue([f], link: c.link, p: c.provider, previewTitle: "", preview: [f], quality: c.quality) { self.pending.removeAll { $0.id == id } }
+            if self.enqueue([f], link: c.link, p: c.provider, previewTitle: "", preview: [f], quality: q, needBytes: c.estBytes ?? 0) { self.pending.removeAll { $0.id == id } }
             self.enqueuing = false
         }
     }
@@ -1569,7 +1653,7 @@ final class Manager: NSObject, ObservableObject {
         }
     }
     @discardableResult
-    private func enqueue(_ chosen: [RemoteFile], link: String, p: Provider, previewTitle: String, preview: [RemoteFile], quality: String) -> Bool {
+    private func enqueue(_ chosen: [RemoteFile], link: String, p: Provider, previewTitle: String, preview: [RemoteFile], quality: String, needBytes: Int64 = 0) -> Bool {
         let ud = UserDefaults.standard
         let def = ud.string(forKey: "defaultDir").map { URL(fileURLWithPath: $0) }
         let ask = ud.object(forKey: "askEachTime") as? Bool ?? true
@@ -1612,11 +1696,17 @@ final class Manager: NSObject, ObservableObject {
             dir = u
         }
         lastDir = dir
+        // длинные записи стримов весят десятки ГБ — проверяем место заранее, а не на 90 %
+        if needBytes > 0, let free = Disk.free(dir), free < needBytes + 1_000_000_000 {
+            status = L("Не хватит места: нужно ≈ \(fmtBytes(needBytes)), свободно \(fmtBytes(free)). Выбери отрывок, качество пониже или другой диск",
+                       "Not enough space: needs ≈ \(fmtBytes(needBytes)), \(fmtBytes(free)) free. Pick a clip, a lower quality or another drive")
+            log("  мало места: нужно \(needBytes), свободно \(free) — не добавлено"); return false
+        }
         let title = previewTitle.isEmpty ? (chosen.first?.relPath ?? L("файл", "file")) : previewTitle
         let rootFolder = UserDefaults.standard.object(forKey: "makeRoot") as? Bool ?? true
         let base = (previewTitle.isEmpty || !rootFolder) ? dir : dir.appendingPathComponent(safeName(previewTitle))
         let part = chosen.count == preview.count ? "" : L(" (выбрано \(chosen.count) из \(preview.count))", " (\(chosen.count) of \(preview.count) selected)")
-        if p == .video { chosen = chosen.map { f in
+        if p.isVideo { chosen = chosen.map { f in
             if case .media(let u, _, let site) = f.source { return RemoteFile(id: f.id, relPath: f.relPath, size: f.size, source: .media(url: u, quality: quality, site: site)) }
             return f } }
         let key = Set(chosen.map(\.relPath))
@@ -2146,20 +2236,60 @@ struct MediaCard: View {
                     }
                     Spacer(minLength: 0)
                     HStack(spacing: 10) {
-                        if c.provider == .video { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights, slow: c.info.slow) }
+                        if c.provider.isVideo { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights, slow: c.info.slow) }
                         else { Label(L("MP3, лучшее качество", "MP3, best quality"), systemImage: "music.note").font(.system(size: 12)).foregroundStyle(Theme.dim) }
                         Spacer(minLength: 8)
                         PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.downloadPending(c.id) }
                     }
-                    if c.provider == .video, let h = Int(c.quality), let sec = c.info.slow[h] {
+                    if c.provider.isVideo, let h = Int(c.quality), let sec = c.info.slow[h] {
                         Label(L("\(QualityPicker.label(h)) у этого ролика есть только в VP9/AV1 — после скачивания перекодирую в H.264, \(QualityPicker.approx(sec))",
                                 "\(QualityPicker.label(h)) is VP9/AV1 only for this video \u{2014} converting to H.264 after download, \(QualityPicker.approx(sec))"),
                               systemImage: "timer").font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
                             .transition(.opacity)
                     }
+                    if c.provider == .stream { StreamRange(c: $c) }
                 }
             }.padding(14)
         }
+    }
+}
+
+/// стрим: отрывок по времени + примерный размер и свободное место
+struct StreamRange: View {
+    @Binding var c: PendingMedia
+    @AppStorage("defaultDir") var defaultDir: String = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
+    var body: some View {
+        let bad = c.range() == nil
+        HStack(spacing: 6) {
+            Image(systemName: "scissors").foregroundStyle(Theme.dim)
+            Text(L("Отрывок: с", "Clip: from")).foregroundStyle(Theme.dim)
+            field($c.from, "0:00")
+            Text(L("до", "to")).foregroundStyle(Theme.dim)
+            field($c.to, c.info.duration.map(fmtClock) ?? L("конца", "end"))
+            if bad { Text(L("проверь время", "check the times")).foregroundStyle(.red.opacity(0.85)) }
+            else if let b = c.estBytes {
+                let free = Disk.free(URL(fileURLWithPath: defaultDir))
+                Text("· ≈ " + fmtBytes(b)).foregroundStyle(Theme.dim)
+                if let free, free < b + 1_000_000_000 {
+                    Label(L("на диске свободно \(fmtBytes(free))", "only \(fmtBytes(free)) free"), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }.font(.system(size: 11)).lineLimit(1)
+        .help(L("Пусто — весь стрим. Время можно писать как 1:10:00, 70:00 или 4200", "Leave empty for the whole stream. Times like 1:10:00, 70:00 or 4200"))
+    }
+    func field(_ b: Binding<String>, _ ph: String) -> some View {
+        TextField(ph, text: b).textFieldStyle(.plain).font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.text)
+            .frame(width: 62).padding(.horizontal, 7).padding(.vertical, 4).background(Theme.bg, in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+enum Disk {
+    /// свободное место на томе папки (с учётом того, что macOS может освободить)
+    static func free(_ dir: URL) -> Int64? {
+        var u = dir
+        while !FileManager.default.fileExists(atPath: u.path) && u.path != "/" { u.deleteLastPathComponent() }
+        return (try? u.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
     }
 }
 
@@ -2219,7 +2349,7 @@ struct PickerView: View {
                             let on = m.selected.contains(f.id); let fl = m.flash.contains(f.id)
                             HStack(spacing: 10) {
                                 CheckBox(mark: on || fl ? .all : .none) { m.toggle([f]) }
-                                Image(systemName: m.provider == .music ? "music.note" : m.provider == .video ? "play.rectangle" : fileIcon(f.relPath)).frame(width: 16).foregroundStyle(Theme.dim)
+                                Image(systemName: m.provider == .music ? "music.note" : m.provider?.isVideo == true ? "play.rectangle" : fileIcon(f.relPath)).frame(width: 16).foregroundStyle(Theme.dim)
                                 Text((f.relPath as NSString).lastPathComponent).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
                                 Spacer()
                                 if let s = f.size { Text(fmtBytes(s)).foregroundStyle(Theme.dim).monospacedDigit() }
@@ -2245,7 +2375,7 @@ struct PickerFooter: View {
         let sel = m.selectedFiles; let sz = sel.compactMap(\.size).reduce(0, +)
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                if m.provider == .video { QualityPicker(value: $m.mediaQuality) }
+                if m.provider?.isVideo == true { QualityPicker(value: $m.mediaQuality) }
                 Text(sel.isEmpty ? L("Ничего не выбрано", "Nothing selected") : L("Выбрано \(sel.count)", "\(sel.count) selected") + (sz > 0 ? " · " + fmtBytes(sz) : ""))
                     .font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(1)
                 Spacer(minLength: 8)
@@ -2438,7 +2568,7 @@ struct DownloadPage: View {
 /// подсказка в поле ссылки: площадки и диски по очереди, по убыванию популярности
 struct RotatingHint: View {
     static let names: [(String, String)] = [("YouTube", "YouTube"), ("Google Диск", "Google Drive"), ("TikTok", "TikTok"), ("Яндекс Диск", "Yandex Disk"),
-        ("Instagram", "Instagram"), ("Dropbox", "Dropbox"), ("Spotify", "Spotify"), ("OneDrive", "OneDrive"), ("SoundCloud", "SoundCloud"),
+        ("Instagram", "Instagram"), ("Dropbox", "Dropbox"), ("Twitch", "Twitch"), ("Spotify", "Spotify"), ("OneDrive", "OneDrive"), ("SoundCloud", "SoundCloud"),
         ("Облако Mail.ru", "Mail.ru Cloud"), ("VK Видео", "VK Video"), ("WeTransfer", "WeTransfer"), ("Vimeo", "Vimeo"), ("pCloud", "pCloud"), ("X (Twitter)", "X (Twitter)")]
     @State private var i = 0
     let timer = Timer.publish(every: 2.2, on: .main, in: .common).autoconnect()
@@ -2557,13 +2687,19 @@ struct HistoryRow: View {
     }
 }
 
+/// вкладка истории: старые записи Twitch (до вкладки «Стримы») тоже уходят в «Стримы»
+func histTab(_ h: HistoryItem) -> String {
+    let c = Provider(rawValue: h.provider)?.category ?? .drive
+    return c == .video && isStreamLink(h.link) ? "stream" : c.rawValue
+}
+
 struct HistoryPage: View {
     @ObservedObject var m: Manager
     @State var q = ""
     @AppStorage("defaultDir") var defaultDir: String = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
     @AppStorage("historyTab") var tab = "drive"
     var items: [HistoryItem] {
-        m.history.filter { (Provider(rawValue: $0.provider)?.category.rawValue ?? "drive") == tab }
+        m.history.filter { histTab($0) == tab }
             .filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.path.localizedCaseInsensitiveContains(q) }
     }
     // «Сейчас качается» — только задачи выбранной вкладки (диски / видео / музыка)
@@ -2578,7 +2714,7 @@ struct HistoryPage: View {
                     if !m.history.isEmpty { GhostButton(title: L("Очистить", "Clear"), icon: "trash") { m.history = []; History.save([]); log("ИСТОРИЯ очищена") } }
                 }
                 HStack(spacing: 2) {
-                    ForEach([("drive", "externaldrive", "Диски", "Drives"), ("video", "play.rectangle", "Видео", "Video"), ("music", "music.note", "Музыка", "Music")], id: \.0) { t in
+                    ForEach([("drive", "externaldrive", "Диски", "Drives"), ("video", "play.rectangle", "Видео", "Video"), ("music", "music.note", "Музыка", "Music"), ("stream", "dot.radiowaves.left.and.right", "Стримы", "Streams")], id: \.0) { t in
                         let on = tab == t.0
                         Button { withAnimation(.easeInOut(duration: 0.15)) { tab = t.0 } } label: {
                             HStack(spacing: 6) { Image(systemName: t.1); Text(L(t.2, t.3)) }.font(.system(size: 12, weight: .semibold)).fixedSize()
@@ -2750,7 +2886,7 @@ struct AboutPage: View {
             Card {
                 VStack(alignment: .leading, spacing: 8) {
                     Logo(size: 26)
-                    Text(L("Скачивает всё по одной ссылке: файлы и папки с облачных дисков, видео и музыку с площадок. Работает автономно, без нейросетей.", "Downloads anything from one link: files and folders from cloud drives, video and music from online platforms. Works on its own, no AI involved."))
+                    Text(L("Скачивает всё по одной ссылке: файлы и папки с облачных дисков, видео и музыку с площадок. Работает автономно.", "Downloads anything from one link: files and folders from cloud drives, video and music from online platforms. Works on its own."))
                         .font(.system(size: 13)).foregroundStyle(Theme.dim)
                     Text(L("Версия ", "Version ") + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).font(.system(size: 12)).foregroundStyle(Theme.dim)
                     Text(L("Поддерживаемые сервисы", "Supported services")).font(.system(size: 11, weight: .semibold)).kerning(1)
@@ -2759,12 +2895,14 @@ struct AboutPage: View {
                     Text(L("Видео и музыка", "Video and music")).font(.system(size: 11, weight: .semibold)).kerning(1)
                         .foregroundStyle(Theme.dim).padding(.top, 6)
                     FlowRow(spacing: 6) {
-                        ForEach(["YouTube", "TikTok", "Instagram", "VK", "Vimeo", "X (Twitter)", "Twitch", "Rutube"], id: \.self) { Pill(text: $0, color: Provider.video.color) }
+                        ForEach(["YouTube", "TikTok", "Instagram", "VK"], id: \.self) { Pill(text: $0, color: Provider.video.color) }
+                        Pill(text: "Twitch", color: Provider.stream.color).help(L("Записи стримов — целиком или отрывком по времени", "Stream recordings \u{2014} in full or as a time-range clip"))
+                        ForEach(["Vimeo", "X (Twitter)", "Rutube"], id: \.self) { Pill(text: $0, color: Provider.video.color) }
                         ForEach(["Spotify", "SoundCloud", "YouTube Music", "Bandcamp", "Mixcloud"], id: \.self) { Pill(text: $0, color: Provider.music.color) }
                         Pill(text: L("и ещё 1000+ сайтов", "and 1000+ more sites"))
                     }
-                    Text(L("Работает с публичными ссылками и роликами в открытом доступе. Папки Dropbox скачиваются одним архивом. Spotify защищён от скачивания — треки находятся по названию на YouTube Music. Движок видео (yt-dlp) скачивается при первом использовании и обновляется сам.",
-                           "Works with public links and publicly available videos. Dropbox folders download as a single archive. Spotify is copy-protected \u{2014} tracks are matched by name on YouTube Music. The video engine (yt-dlp) is downloaded on first use and updates itself."))
+                    Text(L("Работает с публичными ссылками и роликами в открытом доступе. Папки Dropbox скачиваются одним архивом. Spotify защищён от скачивания — треки находятся по названию на YouTube Music. Записи стримов Twitch качаются целиком или отрывком по времени, в исходном качестве. Движок видео (yt-dlp) скачивается при первом использовании и обновляется сам.",
+                           "Works with public links and publicly available videos. Dropbox folders download as a single archive. Spotify is copy-protected \u{2014} tracks are matched by name on YouTube Music. Twitch stream recordings download in full or as a time-range clip, in source quality. The video engine (yt-dlp) is downloaded on first use and updates itself."))
                         .font(.system(size: 11)).foregroundStyle(Theme.dim.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
                 }.padding(18)
             }

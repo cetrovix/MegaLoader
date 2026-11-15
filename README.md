@@ -7,17 +7,19 @@
 
 Paste a link — see what's inside — pick what you need — download. No browser, no accounts, no extra windows.
 
-**Cloud drives:** Yandex Disk · Google Drive · Dropbox · WeTransfer · Mail.ru Cloud · OneDrive · pCloud
+**Cloud drives:** Google Drive · Yandex Disk · Dropbox · WeTransfer · Mail.ru Cloud · OneDrive · pCloud
 **Video:** YouTube · TikTok · Instagram · VK · Vimeo · X (Twitter) · Twitch · Rutube
 **Music:** Spotify · SoundCloud · YouTube Music · Bandcamp · Mixcloud
+**Streams:** Twitch stream recordings (VODs) — in full or as a time-range clip, in source quality
 <sub>…and 1000+ other sites. Public links only. Dropbox folders download as a single archive. Spotify is copy-protected, so tracks are matched by name on YouTube Music.</sub>
 
 - whole folders, playlists and albums — or pick single files
-- video quality: best, 4K, 1080p, 720p or audio only (MP3)
+- video quality: only what the video really has, up to 4K, or audio only (MP3); every video plays on Mac, Windows, DaVinci Resolve and Premiere (H.264 + AAC)
 - large files download over multiple connections
 - pause and resume from the same spot, even after a restart
 - queue several links at once
-- history split into drives, video and music
+- history split into drives, video, music and streams
+- checks free disk space before long downloads
 - updates itself, video engine too
 - English and Russian interface
 
