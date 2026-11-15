@@ -17,7 +17,9 @@ struct RemoteFile: Identifiable, Hashable, Codable {
     }
 }
 
-enum Provider: String, Codable { case yandex = "Яндекс Диск", google = "Google Диск" }
+enum Provider: String, Codable { case yandex = "Яндекс Диск", google = "Google Диск"
+    var title: String { self == .yandex ? L("Яндекс Диск", "Yandex Disk") : L("Google Диск", "Google Drive") }
+}
 
 struct ListResult { let rootName: String; let files: [RemoteFile]; let skipped: [String] }
 
@@ -25,9 +27,9 @@ enum LoaderError: LocalizedError {
     case badLink, http(Int), parse(String)
     var errorDescription: String? {
         switch self {
-        case .badLink: return "Не похоже на публичную ссылку Яндекс Диска или Google Диска"
-        case .http(let c): return "Сервер ответил ошибкой \(c). Ссылка открыта для всех?"
-        case .parse(let s): return "Не удалось разобрать ответ: \(s)"
+        case .badLink: return L("Не похоже на публичную ссылку Яндекс Диска или Google Диска", "This doesn't look like a public Yandex Disk or Google Drive link")
+        case .http(let c): return L("Сервер ответил ошибкой \(c). Ссылка открыта для всех?", "The server returned error \(c). Is the link public?")
+        case .parse(let s): return L("Не удалось разобрать ответ: \(s)", "Couldn't read the response: \(s)")
         }
     }
 }
@@ -36,42 +38,46 @@ enum LoaderError: LocalizedError {
 func human(_ e: Error) -> String {
     if let l = e as? LoaderError {
         switch l {
-        case .badLink: return "Это не похоже на публичную ссылку Яндекс Диска или Google Диска. Проверь, что скопировал ссылку целиком."
+        case .badLink: return L("Это не похоже на публичную ссылку Яндекс Диска или Google Диска. Проверь, что скопировал ссылку целиком.", "This doesn't look like a public cloud drive link. Make sure you copied the whole link.")
         case .http(let c):
             switch c {
-            case 401, 403: return "Доступ закрыт. Попроси владельца открыть ссылку для всех («Доступ по ссылке»)."
-            case 404, 410: return "Файла по ссылке больше нет — его удалили или переместили на диске владельца."
-            case 429: return "Сервис временно ограничил скачивание. Подожди 10–15 минут и нажми «Продолжить»."
-            case 500...599: return "У сервиса сейчас сбой (ошибка \(c)). Попробуй «Продолжить» чуть позже."
-            default: return "Сервис ответил ошибкой \(c). Попробуй «Продолжить»; если повторится — открой Журнал."
+            case 401, 403: return L("Доступ закрыт. Попроси владельца открыть ссылку для всех («Доступ по ссылке»).", "Access denied. Ask the owner to make the link public (“Anyone with the link”).")
+            case 404, 410: return L("Файла по ссылке больше нет — его удалили или переместили на диске владельца.", "The file is no longer available — the owner deleted or moved it.")
+            case 429: return L("Сервис временно ограничил скачивание. Подожди 10–15 минут и нажми «Продолжить».", "The service has temporarily limited downloads. Wait 10–15 minutes and press “Resume”.")
+            case 500...599: return L("У сервиса сейчас сбой (ошибка \(c)). Попробуй «Продолжить» чуть позже.", "The service is having problems (error \(c)). Try “Resume” a bit later.")
+            default: return L("Сервис ответил ошибкой \(c). Попробуй «Продолжить»; если повторится — открой Журнал.", "The service returned error \(c). Try “Resume”; if it happens again, open the Log.")
             }
         case .parse(let s): return s.prefix(1).uppercased() + s.dropFirst() + "."
         }
     }
     if let u = e as? URLError {
         switch u.code {
-        case .notConnectedToInternet: return "Нет интернета. Как только сеть появится — нажми «Продолжить», докачается с того же места."
-        case .timedOut: return "Сервер слишком долго не отвечал. Нажми «Продолжить» — докачается с того же места."
-        case .networkConnectionLost: return "Связь оборвалась. Нажми «Продолжить» — докачается с того же места."
-        case .cannotFindHost, .dnsLookupFailed: return "Не получается найти сервер. Проверь интернет или VPN."
-        case .cancelled: return "Остановлено."
-        default: return "Проблема с сетью (\(u.code.rawValue)). Нажми «Продолжить» — докачается с того же места."
+        case .notConnectedToInternet: return L("Нет интернета. Как только сеть появится — нажми «Продолжить», докачается с того же места.", "No internet. Once you're back online, press “Resume” — it will continue where it stopped.")
+        case .timedOut: return L("Сервер слишком долго не отвечал. Нажми «Продолжить» — докачается с того же места.", "The server took too long to respond. Press “Resume” — it will continue where it stopped.")
+        case .networkConnectionLost: return L("Связь оборвалась. Нажми «Продолжить» — докачается с того же места.", "The connection dropped. Press “Resume” — it will continue where it stopped.")
+        case .cannotFindHost, .dnsLookupFailed: return L("Не получается найти сервер. Проверь интернет или VPN.", "Can't reach the server. Check your internet or VPN.")
+        case .cancelled: return L("Остановлено.", "Stopped.")
+        default: return L("Проблема с сетью (\(u.code.rawValue)). Нажми «Продолжить» — докачается с того же места.", "Network problem (\(u.code.rawValue)). Press “Resume” — it will continue where it stopped.")
         }
     }
     let n = e as NSError
     if n.domain == NSCocoaErrorDomain {
         switch n.code {
-        case NSFileWriteOutOfSpaceError: return "На диске закончилось место. Освободи место и нажми «Продолжить»."
-        case NSFileWriteNoPermissionError, NSFileReadNoPermissionError: return "Нет доступа к папке загрузки. Выбери другую папку."
-        case NSFileNoSuchFileError, NSFileWriteFileExistsError, 4: return "Папку загрузки переместили или удалили. Укажи её новое место — загрузка продолжится."
-        case NSFileWriteVolumeReadOnlyError: return "Диск только для чтения — выбери другую папку."
+        case NSFileWriteOutOfSpaceError: return L("На диске закончилось место. Освободи место и нажми «Продолжить».", "The disk is full. Free up some space and press “Resume”.")
+        case NSFileWriteNoPermissionError, NSFileReadNoPermissionError: return L("Нет доступа к папке загрузки. Выбери другую папку.", "No access to the download folder. Choose another folder.")
+        case NSFileNoSuchFileError, NSFileWriteFileExistsError, 4: return L("Папку загрузки переместили или удалили. Укажи её новое место — загрузка продолжится.", "The download folder was moved or deleted. Show its new location and the download will continue.")
+        case NSFileWriteVolumeReadOnlyError: return L("Диск только для чтения — выбери другую папку.", "The disk is read-only — choose another folder.")
         default: break
         }
     }
-    if n.domain == NSPOSIXErrorDomain && n.code == 28 { return "На диске закончилось место. Освободи место и нажми «Продолжить»." }
-    if n.domain == NSPOSIXErrorDomain && n.code == 2 { return "Папку загрузки переместили или удалили. Укажи её новое место — загрузка продолжится." }
+    if n.domain == NSPOSIXErrorDomain && n.code == 28 { return L("На диске закончилось место. Освободи место и нажми «Продолжить».", "The disk is full. Free up some space and press “Resume”.") }
+    if n.domain == NSPOSIXErrorDomain && n.code == 2 { return L("Папку загрузки переместили или удалили. Укажи её новое место — загрузка продолжится.", "The download folder was moved or deleted. Show its new location and the download will continue.") }
     return e.localizedDescription
 }
+
+/// язык интерфейса: «ru» (по умолчанию) или «en»
+var isEN: Bool { UserDefaults.standard.string(forKey: "lang") == "en" }
+func L(_ ru: String, _ en: String) -> String { isEN ? en : ru }
 
 let UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
 
@@ -94,7 +100,7 @@ func detect(_ link: String) -> Provider? {
 enum Yandex {
     static func list(_ link: String) async throws -> ListResult {
         let root = try await meta(link, path: nil, offset: 0)
-        let rootName = root["name"] as? String ?? "Яндекс Диск"
+        let rootName = root["name"] as? String ?? L("Яндекс Диск", "Yandex Disk")
         if root["type"] as? String == "file" { return ListResult(rootName: "", files: [file(root, link: link, rel: rootName, single: true)], skipped: []) }
         var files: [RemoteFile] = []
         try await walk(link, path: "/", rel: "", into: &files)
@@ -103,7 +109,7 @@ enum Yandex {
     // если основной адрес API перестанет отвечать — пробуем запасной
     static let hosts = ["https://cloud-api.yandex.net", "https://cloud-api.yandex.com"]
     static func api(_ path: String, _ q: [URLQueryItem]) async throws -> [String: Any] {
-        var last: Error = LoaderError.parse("Яндекс")
+        var last: Error = LoaderError.parse(L("Яндекс", "Yandex"))
         for h in hosts {
             do {
                 var c = URLComponents(string: h + path)!; c.queryItems = q
@@ -144,7 +150,7 @@ enum Yandex {
         var q: [URLQueryItem] = [.init(name: "public_key", value: publicKey)]
         if let path { q.append(.init(name: "path", value: path)) }
         let j = try await api("/v1/disk/public/resources/download", q)
-        guard let h = j["href"] as? String, let u = URL(string: h) else { throw LoaderError.parse("ссылка Яндекса на скачивание") }
+        guard let h = j["href"] as? String, let u = URL(string: h) else { throw LoaderError.parse(L("ссылка Яндекса на скачивание", "Yandex download link")) }
         return u
     }
 }
@@ -189,7 +195,7 @@ enum Google {
     static func folderPage(_ id: String) async throws -> (String, String) {
         let d = try await fetch(URL(string: "https://drive.google.com/embeddedfolderview?id=\(id)#list")!)
         let html = String(decoding: d, as: UTF8.self)
-        let title = match(html, #"<title>(.*?)</title>"#).first.map(unescape) ?? "Google Диск"
+        let title = match(html, #"<title>(.*?)</title>"#).first.map(unescape) ?? L("Google Диск", "Google Drive")
         return (title, html)
     }
     static func walk(_ id: String, rel: String, into out: inout [RemoteFile], skipped: inout [String], depth: Int) async throws {
@@ -203,15 +209,15 @@ enum Google {
             let name = unescape(match(e, #"class="flip-entry-title">(.*?)</div>"#).first ?? eid)
             let r = rel.isEmpty ? name : rel + "/" + name
             if href.contains("/folders/") { try await walk(eid, rel: r, into: &out, skipped: &skipped, depth: depth + 1) }
-            else if href.contains("docs.google.com") { skipped.append(r + " (документ Google — скачивается только экспортом)") }
+            else if href.contains("docs.google.com") { skipped.append(r + L(" (документ Google — скачивается только экспортом)", " (Google document — can only be exported)")) }
             else { out.append(RemoteFile(relPath: r, size: nil, source: .google(id: eid))) }
         }
     }
     static var apiKey: String? { let k = UserDefaults.standard.string(forKey: "googleKey")?.trimmingCharacters(in: .whitespaces); return (k?.isEmpty ?? true) ? nil : k }
     static func apiName(_ id: String) async throws -> String {
-        guard let k = apiKey else { throw LoaderError.parse("нет ключа Google API") }
+        guard let k = apiKey else { throw LoaderError.parse(L("нет ключа Google API", "no Google API key")) }
         let j = try JSONSerialization.jsonObject(with: try await fetch(URL(string: "https://www.googleapis.com/drive/v3/files/\(id)?fields=name&supportsAllDrives=true&key=\(k)")!)) as? [String: Any]
-        return j?["name"] as? String ?? "Google Диск"
+        return j?["name"] as? String ?? L("Google Диск", "Google Drive")
     }
     static func apiWalk(_ id: String, rel: String, into out: inout [RemoteFile], skipped: inout [String], depth: Int) async throws {
         guard let k = apiKey, depth <= 30 else { return }
@@ -226,7 +232,7 @@ enum Google {
                 let name = f["name"] as? String ?? "?"; let fid = f["id"] as? String ?? ""; let mime = f["mimeType"] as? String ?? ""
                 let r = rel.isEmpty ? name : rel + "/" + name
                 if mime == "application/vnd.google-apps.folder" { try await apiWalk(fid, rel: r, into: &out, skipped: &skipped, depth: depth + 1) }
-                else if mime.hasPrefix("application/vnd.google-apps") { skipped.append(r + " (документ Google — скачивается только экспортом)") }
+                else if mime.hasPrefix("application/vnd.google-apps") { skipped.append(r + L(" (документ Google — скачивается только экспортом)", " (Google document — can only be exported)")) }
                 else { out.append(RemoteFile(relPath: r, size: (f["size"] as? String).flatMap { Int64($0) }, source: .google(id: fid))) }
             }
             token = j["nextPageToken"] as? String
@@ -418,7 +424,7 @@ final class Engine: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         lock.lock(); let sink = sinks[ObjectIdentifier(t)]; lock.unlock()
         let code = (r as? HTTPURLResponse)?.statusCode ?? 200
         if code >= 400 { sink?.error = LoaderError.http(code); ch(.cancel); return }
-        if sink?.wantRange == true && code != 206 { sink?.error = LoaderError.parse("сервер не поддерживает докачку частями"); ch(.cancel); return }
+        if sink?.wantRange == true && code != 206 { sink?.error = LoaderError.parse(L("сервер не поддерживает докачку частями", "the server doesn't support partial downloads")); ch(.cancel); return }
         ch(.allow)
     }
     func urlSession(_ s: URLSession, dataTask t: URLSessionDataTask, didReceive data: Data) {
@@ -436,7 +442,7 @@ final class Engine: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         var req = URLRequest(url: url); req.setValue("bytes=0-0", forHTTPHeaderField: "Range"); req.setValue(UA, forHTTPHeaderField: "User-Agent")
         req.cachePolicy = .reloadIgnoringLocalCacheData
         let (bytes, resp) = try await URLSession.shared.bytes(for: req)
-        guard let h = resp as? HTTPURLResponse else { throw LoaderError.parse("нет ответа") }
+        guard let h = resp as? HTTPURLResponse else { throw LoaderError.parse(L("нет ответа", "no response")) }
         let type = h.value(forHTTPHeaderField: "Content-Type") ?? ""
         if type.contains("text/html") {
             var html = Data(); for try await b in bytes { html.append(b); if html.count > 400_000 { break } }
@@ -467,14 +473,14 @@ actor ActiveFiles {
 /// скачать один файл максимально быстро: части параллельно, докачка с места обрыва, повторы при сбоях
 func downloadFile(urls: [URL], dest: URL, renameFromServer: Bool, raw: Raw, fid: UUID, knownSize: Int64?, conns: Int) async throws -> URL {
     // 1. какой адрес живой, размер, части
-    var probe: Engine.Probe? = nil; var lastErr: Error = LoaderError.parse("нет адреса")
+    var probe: Engine.Probe? = nil; var lastErr: Error = LoaderError.parse(L("нет адреса", "no address"))
     for u in urls {
         do {
             var p = try await Engine.probe(u)
             if p.html, let real = Google.confirmURL(fromHTML: Engine.lastHTML) {
                 log("    Google вернул страницу-предупреждение — беру ссылку из неё"); p = try await Engine.probe(real)
             }
-            if p.html { throw LoaderError.parse("вместо файла пришла веб-страница (доступ закрыт или сервис что-то поменял)") }
+            if p.html { throw LoaderError.parse(L("вместо файла пришла веб-страница (доступ закрыт или сервис что-то поменял)", "got a web page instead of the file (access is closed or the service changed something)")) }
             probe = p; break
         } catch { lastErr = error; log("    адрес не сработал: \(u.host ?? "") — \(error.localizedDescription)") }
     }
@@ -552,7 +558,7 @@ func downloadFile(urls: [URL], dest: URL, renameFromServer: Bool, raw: Raw, fid:
         try await g.waitForAll()
     }
     // 4. готово
-    guard FileManager.default.fileExists(atPath: part.path) else { throw LoaderError.parse("недокачанный файл пропал с диска") }
+    guard FileManager.default.fileExists(atPath: part.path) else { throw LoaderError.parse(L("недокачанный файл пропал с диска", "the partial file disappeared from the disk")) }
     if FileManager.default.fileExists(atPath: final.path) { _ = try FileManager.default.replaceItemAt(final, withItemAt: part) }
     else { try FileManager.default.moveItem(at: part, to: final) }
     try? FileManager.default.removeItem(at: stateURL)
@@ -629,7 +635,7 @@ final class Manager: NSObject, ObservableObject {
     @Published var previewTitle = ""
     @Published var preview: [RemoteFile] = []
     @Published var skipped: [String] = []
-    @Published var status = "Вставь публичную ссылку — увидишь, что будет скачано"
+    @Published var status = L("Вставь публичную ссылку — увидишь, что будет скачано", "Paste a public link to see what will be downloaded")
     @Published var busy = false
     @Published var selected: Set<UUID> = []      // выбранные файлы
     @Published var cwd: [String] = []             // текущая папка в браузере
@@ -653,8 +659,12 @@ final class Manager: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        Task { await checkUpdate(manual: false) }
+        Task {
+            await checkUpdate(manual: false)
+            if ProcessInfo.processInfo.environment["DL_AUTOUPDATE"] != nil, update != nil { installUpdate() }   // для проверки обновления
+        }
         Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in Task { @MainActor in await self?.checkUpdate(manual: false) } }
+        if let pg = ProcessInfo.processInfo.environment["DL_PAGE"], let p = Page.allCases.first(where: { "\($0)" == pg }) { page = p }   // для проверки сборки
         if let l = ProcessInfo.processInfo.environment["DL_LINK"] { link = l; DispatchQueue.main.async { self.check() } }   // для проверки сборки
         // восстановить очередь: незаконченное продолжаем в том же порядке
         let recs = QueueStore.load()
@@ -679,7 +689,7 @@ final class Manager: NSObject, ObservableObject {
             jobs = uniq; QueueStore.save(jobs)
             let resume = jobs.filter { $0.state == .waiting }.count
             log("ВОССТАНОВЛЕНА очередь: задач \(jobs.count), продолжаю \(resume)")
-            if resume > 0 { status = "Продолжаю незаконченные загрузки: \(resume)" }
+            if resume > 0 { status = L("Продолжаю незаконченные загрузки: \(resume)", "Resuming unfinished downloads: \(resume)") }
             DispatchQueue.main.async { self.pump() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -722,7 +732,7 @@ final class Manager: NSObject, ObservableObject {
         guard !l.isEmpty else { return }
         guard let p = detect(l) else { status = LoaderError.badLink.localizedDescription; provider = nil; preview = []; return }
         provider = p; busy = true; preview = []; skipped = []
-        status = "Читаю содержимое \(p.rawValue)…"
+        status = L("Читаю содержимое \(p.title)…", "Reading \(p.title)…")
         Task {
             do {
                 let r = p == .yandex ? try await Yandex.list(l) : try await Google.list(l)
@@ -732,8 +742,8 @@ final class Manager: NSObject, ObservableObject {
                 skipped = r.skipped
                 selected = []; cwd = []
                 log("ПРОВЕРКА \(p.rawValue): \(l) → «\(r.rootName)», файлов \(preview.count), \(fmtBytes(previewSize)), пропущено \(skipped.count)")
-                status = preview.isEmpty ? "Файлов не найдено" :
-                    "Файлов: \(preview.count)" + (previewSize > 0 ? " · \(fmtBytes(previewSize))" : "")
+                status = preview.isEmpty ? L("Файлов не найдено", "No files found") :
+                    L("Файлов: \(preview.count)", "Files: \(preview.count)") + (previewSize > 0 ? " · \(fmtBytes(previewSize))" : "")
             } catch { status = human(error); log("ОШИБКА проверки \(l): \(error.localizedDescription)") }
             busy = false
         }
@@ -766,20 +776,20 @@ final class Manager: NSObject, ObservableObject {
         else {
             let panel = NSOpenPanel()
             panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
-            panel.prompt = "Скачать сюда"; panel.message = "Куда положить скачанное?"
+            panel.prompt = L("Скачать сюда", "Download here"); panel.message = L("Куда положить скачанное?", "Where should the files go?")
             panel.directoryURL = lastDir ?? def
             NSApp.activate(ignoringOtherApps: true)
             guard panel.runModal() == .OK, let u = panel.url else { log("  выбор папки отменён"); return }
             dir = u
         }
         lastDir = dir
-        let title = previewTitle.isEmpty ? (preview.first?.relPath ?? "файл") : previewTitle
+        let title = previewTitle.isEmpty ? (preview.first?.relPath ?? L("файл", "file")) : previewTitle
         let rootFolder = UserDefaults.standard.object(forKey: "makeRoot") as? Bool ?? true
         let base = (previewTitle.isEmpty || !rootFolder) ? dir : dir.appendingPathComponent(safeName(previewTitle))
-        let part = chosen.count == preview.count ? "" : " (выбрано \(chosen.count) из \(preview.count))"
+        let part = chosen.count == preview.count ? "" : L(" (выбрано \(chosen.count) из \(preview.count))", " (\(chosen.count) of \(preview.count) selected)")
         let key = Set(chosen.map(\.relPath))
         if jobs.contains(where: { $0.base.standardizedFileURL == base.standardizedFileURL && !key.isDisjoint(with: $0.files.map(\.relPath)) && [.running, .waiting].contains($0.state) }) {
-            status = "Эти файлы уже качаются в эту папку — дубль не добавлен"; log("  дубль не добавлен: \(link) → \(base.path)"); return
+            status = L("Эти файлы уже качаются в эту папку — дубль не добавлен", "These files are already downloading to this folder — duplicate skipped"); log("  дубль не добавлен: \(link) → \(base.path)"); return
         }
         let job = Job(link: link, provider: p, title: title + part, files: chosen, base: base)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -789,7 +799,7 @@ final class Manager: NSObject, ObservableObject {
         jobs.insert(job, at: 0); QueueStore.save(jobs)
         // поле свободно под следующую ссылку
         self.link = ""; self.preview = []; skipped = []; self.provider = nil; self.previewTitle = ""; selected = []; cwd = []
-        status = "Добавлено в очередь. Можно вставлять следующую ссылку"
+        status = L("Добавлено в очередь. Можно вставлять следующую ссылку", "Added to the queue. You can paste the next link")
         pump()
     }
 
@@ -823,7 +833,7 @@ final class Manager: NSObject, ObservableObject {
             }
         }
         let left = j.files.count - j.completed.count
-        j.folderProblem = "Папку «\(j.base.lastPathComponent)» удалили или унесли на другой диск. Готово было \(j.completed.count) из \(j.files.count). Можно докачать оставшиеся \(left) в новую папку или скачать всё заново."
+        j.folderProblem = L("Папку «\(j.base.lastPathComponent)» удалили или унесли на другой диск. Готово было \(j.completed.count) из \(j.files.count). Можно докачать оставшиеся \(left) в новую папку или скачать всё заново.", "The folder “\(j.base.lastPathComponent)” was deleted or moved to another disk. \(j.completed.count) of \(j.files.count) were done. You can download the remaining \(left) to a new folder or download everything again.")
         log("ПАПКА ПРОПАЛА «\(j.title)»: \(j.base.path)")
         return false
     }
@@ -831,8 +841,8 @@ final class Manager: NSObject, ObservableObject {
     func relink(_ j: Job, fresh: Bool = false) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
-        panel.prompt = fresh ? "Скачать всё сюда" : "Докачать сюда"
-        panel.message = fresh ? "Куда скачать всё содержимое «\(j.base.lastPathComponent)» заново?" : "Куда докачать оставшиеся файлы «\(j.base.lastPathComponent)»? Если папка просто переехала — покажи её новое место."
+        panel.prompt = fresh ? L("Скачать всё сюда", "Download everything here") : L("Докачать сюда", "Resume here")
+        panel.message = fresh ? L("Куда скачать всё содержимое «\(j.base.lastPathComponent)» заново?", "Where should “\(j.base.lastPathComponent)” be downloaded again?") : L("Куда докачать оставшиеся файлы «\(j.base.lastPathComponent)»? Если папка просто переехала — покажи её новое место.", "Where should the remaining files of “\(j.base.lastPathComponent)” go? If the folder just moved, show its new location.")
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, var u = panel.url else { return }
         // выбрали родительскую папку — кладём внутрь неё папку с прежним названием, а не россыпью
@@ -869,7 +879,7 @@ final class Manager: NSObject, ObservableObject {
     private func keepAwake() {
         let any = jobs.contains { $0.state == .running }
         if any, activity == nil {
-            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Идёт загрузка")
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: L("Идёт загрузка", "Downloading"))
         } else if !any, let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil }
     }
 
@@ -925,7 +935,7 @@ final class Manager: NSObject, ObservableObject {
                 if let fresh = try? await Yandex.resolve(publicKey: k, path: p), !urls.contains(fresh) { urls.append(fresh) }
             case .google(let id): urls = Google.downloadURLs(id); rename = dest.pathExtension.isEmpty
             }
-            if urls.isEmpty { throw LoaderError.parse("не удалось получить ссылку на скачивание") }
+            if urls.isEmpty { throw LoaderError.parse(L("не удалось получить ссылку на скачивание", "couldn't get a download link")) }
             let saved = try await downloadFile(urls: urls, dest: dest, renameFromServer: rename, raw: j.raw, fid: f.id, knownSize: f.size, conns: conns)
             j.completed.insert(f.id); j.doneCount = j.completed.count
             QueueStore.save(jobs)
@@ -955,9 +965,9 @@ final class Manager: NSObject, ObservableObject {
             let zip = assets.first { ($0["name"] as? String ?? "").lowercased().hasSuffix(".zip") }?["browser_download_url"] as? String
             if !tag.isEmpty, tag.compare(cur, options: .numeric) == .orderedDescending, let u = (j?["html_url"] as? String).flatMap(URL.init(string:)) {
                 update = (tag, u, zip.flatMap(URL.init(string:))); log("ОБНОВЛЕНИЕ доступно: \(tag) (сейчас \(cur))")
-                if manual { status = "Доступна версия \(tag) — нажми плашку внизу окна" }
-            } else { update = nil; if manual { status = "Установлена последняя версия \(cur)" } }
-        } catch { if manual { status = "Не удалось проверить обновления: \(human(error))" }; log("ОБНОВЛЕНИЯ: \(error.localizedDescription)") }
+                if manual { status = L("Доступна версия \(tag) — нажми плашку внизу окна", "Version \(tag) is available — click the banner at the bottom") }
+            } else { update = nil; if manual { status = L("Установлена последняя версия \(cur)", "You have the latest version \(cur)") } }
+        } catch { if manual { status = L("Не удалось проверить обновления: \(human(error))", "Couldn't check for updates: \(human(error))") }; log("ОБНОВЛЕНИЯ: \(error.localizedDescription)") }
     }
 
     /// скачать обновление, заменить приложение и перезапустить (очередь загрузок продолжится сама)
@@ -966,7 +976,7 @@ final class Manager: NSObject, ObservableObject {
         guard let zip = u.zip else { NSWorkspace.shared.open(u.url); return }   // в релизе нет zip — открываем страницу
         let appURL = Bundle.main.bundleURL
         guard FileManager.default.isWritableFile(atPath: appURL.deletingLastPathComponent().path) else {
-            updateNote = "Нет прав на папку с приложением — открываю страницу загрузки"; NSWorkspace.shared.open(u.url); return
+            updateNote = L("Нет прав на папку с приложением — открываю страницу загрузки", "No permission for the app folder — opening the download page"); NSWorkspace.shared.open(u.url); return
         }
         updateProgress = 0; updateNote = ""
         log("ОБНОВЛЕНИЕ: качаю \(u.version) — \(zip.absoluteString)")
@@ -980,11 +990,11 @@ final class Manager: NSObject, ObservableObject {
             defer { poll.invalidate() }
             do {
                 let file = try await downloadFile(urls: [zip], dest: tmp.appendingPathComponent("update.zip"), renameFromServer: false, raw: raw, fid: fid, knownSize: nil, conns: 4)
-                updateNote = "Устанавливаю…"; updateProgress = 1
+                updateNote = L("Устанавливаю…", "Installing…"); updateProgress = 1
                 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto"); p.arguments = ["-x", "-k", file.path, tmp.path]
                 try p.run(); p.waitUntilExit()
                 guard let newApp = try FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil).first(where: { $0.pathExtension == "app" }) else {
-                    throw LoaderError.parse("в архиве обновления нет приложения")
+                    throw LoaderError.parse(L("в архиве обновления нет приложения", "the update archive has no app inside"))
                 }
                 // после выхода: заменить старое приложение новым, снять карантин, открыть
                 let pid = ProcessInfo.processInfo.processIdentifier
@@ -1001,7 +1011,7 @@ final class Manager: NSObject, ObservableObject {
                 QueueStore.save(jobs)
                 NSApp.terminate(nil)
             } catch {
-                updateProgress = nil; updateNote = "Не получилось обновиться: \(human(error))"
+                updateProgress = nil; updateNote = L("Не получилось обновиться: \(human(error))", "Update failed: \(human(error))")
                 log("ОБНОВЛЕНИЕ не удалось: \(error.localizedDescription)")
             }
         }
@@ -1050,7 +1060,7 @@ struct Pill: View {
 
 struct ProviderBadge: View {
     let p: Provider
-    var body: some View { Pill(text: p == .yandex ? "Яндекс" : "Google", color: p == .yandex ? .yellow : Color(red: 0.5, green: 0.7, blue: 1)) }
+    var body: some View { Pill(text: p == .yandex ? L("Яндекс", "Yandex") : "Google", color: p == .yandex ? .yellow : Color(red: 0.5, green: 0.7, blue: 1)) }
 }
 
 struct SectionHeader: View {
@@ -1129,23 +1139,23 @@ struct SaveModeSwitch: View {
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 2) {
-                seg("Спрашивать путь", icon: "questionmark.folder", on: ask) { ask = true }
-                seg("По умолчанию", icon: "folder.fill", on: !ask) { switchToDefault() }
+                seg(L("Спрашивать путь", "Ask for folder"), icon: "questionmark.folder", on: ask) { ask = true }
+                seg(L("По умолчанию", "Default folder"), icon: "folder.fill", on: !ask) { switchToDefault() }
             }.fixedSize().padding(3).background(Theme.card, in: Capsule()).overlay(Capsule().stroke(Theme.line).allowsHitTesting(false))
             if !ask {
                 Button { pickFolder() } label: {
                     HStack(spacing: 4) { Text(shortName).lineLimit(1).fixedSize(); Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)) }.fixedSize()
                         .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text)
-                }.buttonStyle(.tap).help(defaultDir + " — нажми, чтобы сменить")
+                }.buttonStyle(.tap).help(defaultDir + L(" — нажми, чтобы сменить", " — click to change"))
                 .popover(isPresented: $hint, arrowEdge: .bottom) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Label("Создал папку для загрузок", systemImage: "folder.badge.plus").font(.system(size: 13, weight: .semibold))
-                        Text("Теперь всё будет качаться в «Загрузки/DiskLoader» — как у браузера. Можно оставить или выбрать любую другую папку.")
+                        Label(L("Создал папку для загрузок", "Created a downloads folder"), systemImage: "folder.badge.plus").font(.system(size: 13, weight: .semibold))
+                        Text(L("Теперь всё будет качаться в «Загрузки/DiskLoader» — как у браузера. Можно оставить или выбрать любую другую папку.", "Everything will now go to “Downloads/DiskLoader”, just like a browser. Keep it or choose any other folder."))
                             .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         HStack {
-                            Button("Выбрать другую…") { hint = false; pickFolder() }
+                            Button(L("Выбрать другую…", "Choose another…")) { hint = false; pickFolder() }
                             Spacer()
-                            Button("Оставить") { hint = false }.keyboardShortcut(.defaultAction)
+                            Button(L("Оставить", "Keep")) { hint = false }.keyboardShortcut(.defaultAction)
                         }
                     }.padding(14).frame(width: 300)
                 }
@@ -1189,7 +1199,7 @@ struct PickerView: View {
     var body: some View {
         Card {
             if m.isSingleFile, let f = m.preview.first {
-                SectionHeader(text: "Один файл")
+                SectionHeader(text: L("Один файл", "Single file"))
                 HStack(spacing: 12) {
                     Image(systemName: fileIcon(f.relPath)).font(.system(size: 18)).foregroundStyle(Theme.pink)
                     VStack(alignment: .leading, spacing: 2) {
@@ -1197,11 +1207,11 @@ struct PickerView: View {
                         if let s = f.size { Text(fmtBytes(s)).font(.system(size: 12)).foregroundStyle(Theme.dim) }
                     }
                     Spacer()
-                    PinkButton(title: "Скачать", icon: "arrow.down") { m.addToQueue(m.preview) }.keyboardShortcut(.defaultAction)
+                    PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.addToQueue(m.preview) }.keyboardShortcut(.defaultAction)
                 }.padding(14).background(Theme.row, in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 10).padding(.bottom, 10)
             } else {
                 HStack(spacing: 4) {
-                    Button { m.cwd = [] } label: { Label(m.previewTitle.isEmpty ? "Корень" : m.previewTitle, systemImage: "externaldrive") }
+                    Button { m.cwd = [] } label: { Label(m.previewTitle.isEmpty ? L("Корень", "Root") : m.previewTitle, systemImage: "externaldrive") }
                         .buttonStyle(.tap).foregroundStyle(m.cwd.isEmpty ? Theme.text : Theme.dim)
                     ForEach(Array(m.cwd.enumerated()), id: \.offset) { i, c in
                         Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(Theme.dim)
@@ -1210,8 +1220,8 @@ struct PickerView: View {
                     }
                     Spacer()
                     let here = m.filesUnder(m.cwd)
-                    Button(m.mark(here) == .all ? "Снять выбор" : "Выбрать всё здесь") { m.toggle(here) }.buttonStyle(.tap).foregroundStyle(Theme.pink)
-                    if !m.cwd.isEmpty { Button { m.cwd.removeLast() } label: { Label("Назад", systemImage: "arrow.uturn.left") }.buttonStyle(.tap).foregroundStyle(Theme.dim).padding(.leading, 10) }
+                    Button(m.mark(here) == .all ? L("Снять выбор", "Deselect") : L("Выбрать всё здесь", "Select all here")) { m.toggle(here) }.buttonStyle(.tap).foregroundStyle(Theme.pink)
+                    if !m.cwd.isEmpty { Button { m.cwd.removeLast() } label: { Label(L("Назад", "Back"), systemImage: "arrow.uturn.left") }.buttonStyle(.tap).foregroundStyle(Theme.dim).padding(.leading, 10) }
                 }.font(.system(size: 12, weight: .semibold)).padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
                 Divider().overlay(Theme.line)
                 ScrollView {
@@ -1222,13 +1232,13 @@ struct PickerView: View {
                                 CheckBox(mark: fs.contains { m.flash.contains($0.id) } ? .all : m.mark(fs)) { m.toggle(fs) }
                                 Image(systemName: "folder.fill").foregroundStyle(Theme.pinkSoft)
                                 Text(name).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-                                Text("\(fs.count) файлов" + (sz > 0 ? " · " + fmtBytes(sz) : "")).foregroundStyle(Theme.dim).font(.system(size: 11))
+                                Text(L("\(fs.count) файлов", "\(fs.count) files") + (sz > 0 ? " · " + fmtBytes(sz) : "")).foregroundStyle(Theme.dim).font(.system(size: 11))
                                 Spacer()
                                 Button { m.cwd.append(name) } label: {
-                                    HStack(spacing: 4) { Text("Открыть"); Image(systemName: "chevron.right") }
+                                    HStack(spacing: 4) { Text(L("Открыть", "Open")); Image(systemName: "chevron.right") }
                                         .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.dim)
                                         .padding(.horizontal, 8).padding(.vertical, 4).background(Theme.card, in: Capsule())
-                                }.buttonStyle(.tap).help("Зайти в папку (или двойной клик по строке)")
+                                }.buttonStyle(.tap).help(L("Зайти в папку (или двойной клик по строке)", "Open the folder (or double-click the row)"))
                             }.font(.system(size: 13)).padding(.horizontal, 12).padding(.vertical, 8)
                             .background(fs.contains { m.flash.contains($0.id) } ? Theme.pink.opacity(0.45) : m.mark(fs) == .none ? Theme.row.opacity(0.6) : Theme.pink.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
                             .contentShape(Rectangle())
@@ -1250,7 +1260,7 @@ struct PickerView: View {
                         }
                     }.padding(8)
                 }.frame(minHeight: 120, maxHeight: listMax)
-                if !m.skipped.isEmpty { Text("Пропущено: " + m.skipped.joined(separator: "; ")).font(.caption).foregroundStyle(.orange).lineLimit(2).padding(.horizontal, 16) }
+                if !m.skipped.isEmpty { Text(L("Пропущено: ", "Skipped: ") + m.skipped.joined(separator: "; ")).font(.caption).foregroundStyle(.orange).lineLimit(2).padding(.horizontal, 16) }
                 Divider().overlay(Theme.line)
                 PickerFooter(m: m).padding(.horizontal, 16).padding(.vertical, 12)
             }
@@ -1265,18 +1275,18 @@ struct PickerFooter: View {
         let sel = m.selectedFiles; let sz = sel.compactMap(\.size).reduce(0, +)
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                Text(sel.isEmpty ? "Ничего не выбрано" : "Выбрано \(sel.count)" + (sz > 0 ? " · " + fmtBytes(sz) : ""))
+                Text(sel.isEmpty ? L("Ничего не выбрано", "Nothing selected") : L("Выбрано \(sel.count)", "\(sel.count) selected") + (sz > 0 ? " · " + fmtBytes(sz) : ""))
                     .font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(1)
                 Spacer(minLength: 8)
-                GhostButton(title: "Скачать выбранное", disabled: sel.isEmpty) { m.flashThenQueue(m.selectedFiles) }
-                PinkButton(title: "Скачать всё", icon: "arrow.down") { m.flashThenQueue(m.preview) }.keyboardShortcut(.defaultAction)
+                GhostButton(title: L("Скачать выбранное", "Download selected"), disabled: sel.isEmpty) { m.flashThenQueue(m.selectedFiles) }
+                PinkButton(title: L("Скачать всё", "Download all"), icon: "arrow.down") { m.flashThenQueue(m.preview) }.keyboardShortcut(.defaultAction)
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
-                    Text(sel.isEmpty ? "Ничего не выбрано" : "Выбрано \(sel.count)").font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(1)
+                    Text(sel.isEmpty ? L("Ничего не выбрано", "Nothing selected") : L("Выбрано \(sel.count)", "\(sel.count) selected")).font(.system(size: 12)).foregroundStyle(Theme.dim).lineLimit(1)
                     Spacer(minLength: 8)
-                    GhostButton(title: "Выбранное", disabled: sel.isEmpty) { m.flashThenQueue(m.selectedFiles) }
-                    PinkButton(title: "Всё", icon: "arrow.down") { m.flashThenQueue(m.preview) }.keyboardShortcut(.defaultAction)
+                    GhostButton(title: L("Выбранное", "Selected"), disabled: sel.isEmpty) { m.flashThenQueue(m.selectedFiles) }
+                    PinkButton(title: L("Всё", "All"), icon: "arrow.down") { m.flashThenQueue(m.preview) }.keyboardShortcut(.defaultAction)
                 }
             }
         }
@@ -1303,20 +1313,20 @@ struct JobRow: View {
                 Spacer()
                 stateLabel
                 if j.state == .running || j.state == .waiting {
-                    Button { m.stop(j) } label: { Image(systemName: "pause.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help("Пауза")
+                    Button { m.stop(j) } label: { Image(systemName: "pause.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help(L("Пауза", "Pause"))
                 } else {
-                    if j.state != .done { Button { m.resume(j) } label: { Image(systemName: "play.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help("Продолжить с места остановки") }
-                    Button { NSWorkspace.shared.activateFileViewerSelecting([j.base]) } label: { Image(systemName: "folder") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help("Показать в Finder")
+                    if j.state != .done { Button { m.resume(j) } label: { Image(systemName: "play.circle.fill") }.buttonStyle(.tap).foregroundStyle(Theme.pink).help(L("Продолжить с места остановки", "Resume where it stopped")) }
+                    Button { NSWorkspace.shared.activateFileViewerSelecting([j.base]) } label: { Image(systemName: "folder") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Показать в Finder", "Show in Finder"))
                 }
-                Button { m.remove(j) } label: { Image(systemName: "xmark.circle") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help("Убрать задачу (скачанное останется)")
+                Button { m.remove(j) } label: { Image(systemName: "xmark.circle") }.buttonStyle(.tap).foregroundStyle(Theme.dim).help(L("Убрать задачу (скачанное останется)", "Remove task (downloaded files stay)"))
             }.font(.system(size: 15))
             PinkBar(value: j.progress, color: color)
             HStack(spacing: 16) {
-                Label("\(j.doneCount) из \(j.files.count)", systemImage: "doc.on.doc")
-                Label(fmtBytes(j.bytesDone) + (j.expected > 0 ? " из " + fmtBytes(j.expected) : ""), systemImage: "internaldrive")
-                if j.state == .running { Label(fmtBytes(Int64(j.speed)) + "/с", systemImage: "speedometer").foregroundStyle(Theme.pink) }
+                Label(L("\(j.doneCount) из \(j.files.count)", "\(j.doneCount) of \(j.files.count)"), systemImage: "doc.on.doc")
+                Label(fmtBytes(j.bytesDone) + (j.expected > 0 ? L(" из ", " of ") + fmtBytes(j.expected) : ""), systemImage: "internaldrive")
+                if j.state == .running { Label(fmtBytes(Int64(j.speed)) + L("/с", "/s"), systemImage: "speedometer").foregroundStyle(Theme.pink) }
                 Spacer()
-                Button(open ? "Скрыть файлы" : "Файлы") { open.toggle() }.buttonStyle(.tap).foregroundStyle(Theme.dim)
+                Button(open ? L("Скрыть файлы", "Hide files") : L("Файлы", "Files")) { open.toggle() }.buttonStyle(.tap).foregroundStyle(Theme.dim)
             }.font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.dim).monospacedDigit()
             if let fp = j.folderProblem {
                 HStack(spacing: 10) {
@@ -1324,8 +1334,8 @@ struct JobRow: View {
                     Text(fp).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
-                        PinkButton(title: "Докачать оставшееся…", icon: "arrow.down.to.line") { m.relink(j) }.keyboardShortcut(.defaultAction)
-                        GhostButton(title: "Скачать всё заново…", icon: "arrow.clockwise") { m.relink(j, fresh: true) }
+                        PinkButton(title: L("Докачать оставшееся…", "Download the rest…"), icon: "arrow.down.to.line") { m.relink(j) }.keyboardShortcut(.defaultAction)
+                        GhostButton(title: L("Скачать всё заново…", "Download everything again…"), icon: "arrow.clockwise") { m.relink(j, fresh: true) }
                     }
                 }.padding(10).background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
             }
@@ -1337,7 +1347,7 @@ struct JobRow: View {
                             Text(t).foregroundStyle(Theme.text.opacity(0.85)).fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    if j.failed.count > 4 { Text("и ещё \(j.failed.count - 4) — подробности в Журнале").foregroundStyle(Theme.dim) }
+                    if j.failed.count > 4 { Text(L("и ещё \(j.failed.count - 4) — подробности в Журнале", "and \(j.failed.count - 4) more — see the Log")).foregroundStyle(Theme.dim) }
                 }.font(.system(size: 12)).padding(10).background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
             if open {
@@ -1358,11 +1368,11 @@ struct JobRow: View {
     }
     @ViewBuilder var stateLabel: some View {
         switch j.state {
-        case .waiting: Pill(text: "в очереди")
-        case .running: Pill(text: "качаю", color: Theme.pink)
-        case .done: Pill(text: "готово", color: .green)
-        case .stopped: Pill(text: "на паузе", color: .orange)
-        case .failed: Pill(text: "ошибки", color: .red)
+        case .waiting: Pill(text: L("в очереди", "queued"))
+        case .running: Pill(text: L("качаю", "downloading"), color: Theme.pink)
+        case .done: Pill(text: L("готово", "done"), color: .green)
+        case .stopped: Pill(text: L("на паузе", "paused"), color: .orange)
+        case .failed: Pill(text: L("ошибки", "errors"), color: .red)
         }
     }
 }
@@ -1373,16 +1383,16 @@ struct DownloadPage: View {
       GeometryReader { geo in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                PageTitle(text: "Скачать", trailing: AnyView(SaveModeSwitch()))
+                PageTitle(text: L("Скачать", "Download"), trailing: AnyView(SaveModeSwitch()))
                 Card {
                     HStack(spacing: 10) {
                         Image(systemName: "link").foregroundStyle(Theme.dim)
-                        TextField("Ссылка на Яндекс Диск или Google Диск", text: $m.link)
+                        TextField(L("Ссылка на Яндекс Диск или Google Диск", "Link to a cloud drive"), text: $m.link)
                             .textFieldStyle(.plain).font(.system(size: 15)).foregroundStyle(Theme.text).onSubmit { m.check() }
                         Divider().frame(height: 22)
-                        Button { if let s = NSPasteboard.general.string(forType: .string) { m.link = s; m.check() } } label: { Label("Вставить", systemImage: "doc.on.clipboard") }
+                        Button { if let s = NSPasteboard.general.string(forType: .string) { m.link = s; m.check() } } label: { Label(L("Вставить", "Paste"), systemImage: "doc.on.clipboard") }
                             .buttonStyle(.tap).foregroundStyle(Theme.dim)
-                        Button { m.check() } label: { Label("Проверить", systemImage: "magnifyingglass") }
+                        Button { m.check() } label: { Label(L("Проверить", "Check"), systemImage: "magnifyingglass") }
                             .buttonStyle(.tap).foregroundStyle(m.link.isEmpty ? Theme.dim.opacity(0.5) : Theme.text).disabled(m.busy || m.link.isEmpty)
                     }.padding(16)
                     Divider().overlay(Theme.line)
@@ -1394,15 +1404,15 @@ struct DownloadPage: View {
                 }
                 if !m.preview.isEmpty { PickerView(m: m, listMax: max(120, min(460, geo.size.height - 360))) }
                 HStack {
-                    Text("ЗАГРУЗКИ").font(.system(size: 11, weight: .semibold)).kerning(1).foregroundStyle(Theme.dim)
-                    if m.summary.speed > 0 { Text(fmtBytes(Int64(m.summary.speed)) + "/с").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.pink).monospacedDigit() }
+                    Text(L("ЗАГРУЗКИ", "DOWNLOADS")).font(.system(size: 11, weight: .semibold)).kerning(1).foregroundStyle(Theme.dim)
+                    if m.summary.speed > 0 { Text(fmtBytes(Int64(m.summary.speed)) + L("/с", "/s")).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.pink).monospacedDigit() }
                     Spacer()
                     if m.jobs.contains(where: { $0.state == .done }) {
-                        Button("Убрать завершённые") { m.clearFinished() }.buttonStyle(.tap).font(.system(size: 12)).foregroundStyle(Theme.dim)
+                        Button(L("Убрать завершённые", "Clear completed")) { m.clearFinished() }.buttonStyle(.tap).font(.system(size: 12)).foregroundStyle(Theme.dim)
                     }
                 }.padding(.top, 4)
                 if m.jobs.isEmpty {
-                    Text("Пока пусто. Каждая ссылка — отдельная задача, новые можно добавлять, пока идут старые.")
+                    Text(L("Пока пусто. Каждая ссылка — отдельная задача, новые можно добавлять, пока идут старые.", "Nothing here yet. Each link is a separate task — you can add new ones while others are running."))
                         .font(.system(size: 13)).foregroundStyle(Theme.dim).frame(maxWidth: .infinity, minHeight: 90)
                         .background(Theme.card, in: RoundedRectangle(cornerRadius: 16))
                 } else {
@@ -1435,8 +1445,13 @@ struct PageTitle: View {
 
 // --- История
 
-let ruDate: DateFormatter = { let f = DateFormatter(); f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMMM yyyy 'г. в' HH:mm"; return f }()
-func fmtDur(_ s: Double) -> String { s < 60 ? "\(Int(s)) с" : s < 3600 ? "\(Int(s / 60)) мин \(Int(s) % 60) с" : "\(Int(s / 3600)) ч \(Int(s) % 3600 / 60) мин" }
+var ruDate: DateFormatter {
+    let f = DateFormatter()
+    if isEN { f.locale = Locale(identifier: "en_US"); f.dateFormat = "MMMM d, yyyy 'at' HH:mm" }
+    else { f.locale = Locale(identifier: "ru_RU"); f.dateFormat = "d MMMM yyyy 'г. в' HH:mm" }
+    return f
+}
+func fmtDur(_ s: Double) -> String { s < 60 ? L("\(Int(s)) с", "\(Int(s)) s") : s < 3600 ? L("\(Int(s / 60)) мин \(Int(s) % 60) с", "\(Int(s / 60)) min \(Int(s) % 60) s") : L("\(Int(s / 3600)) ч \(Int(s) % 3600 / 60) мин", "\(Int(s / 3600)) h \(Int(s) % 3600 / 60) min") }
 
 struct IconBtn: View {
     let icon: String; let help: String; var color: Color = Theme.dim; var disabled = false; let action: () -> Void
@@ -1460,23 +1475,23 @@ struct HistoryRow: View {
             HStack(alignment: .center) {
                 Text(ruDate.string(from: h.date)).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
                 Spacer()
-                IconBtn(icon: "folder", help: exists ? "Показать в Finder" : "Папки нет на месте", disabled: !exists) {
+                IconBtn(icon: "folder", help: exists ? L("Показать в Finder", "Show in Finder") : L("Папки нет на месте", "Folder is missing"), disabled: !exists) {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: h.path)]) }
-                IconBtn(icon: "doc.on.doc", help: "Скопировать ссылку") {
+                IconBtn(icon: "doc.on.doc", help: L("Скопировать ссылку", "Copy link")) {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(h.link, forType: .string) }
-                IconBtn(icon: "arrow.counterclockwise", help: "Открыть ссылку снова", color: Theme.pink) { m.link = h.link; m.page = .download; m.check() }
-                IconBtn(icon: "trash", help: "Убрать из истории") { m.history.removeAll { $0.id == h.id }; History.save(m.history) }
+                IconBtn(icon: "arrow.counterclockwise", help: L("Открыть ссылку снова", "Open the link again"), color: Theme.pink) { m.link = h.link; m.page = .download; m.check() }
+                IconBtn(icon: "trash", help: L("Убрать из истории", "Remove from history")) { m.history.removeAll { $0.id == h.id }; History.save(m.history) }
             }
             HStack(spacing: 8) {
                 Text(h.title).font(.system(size: 14).italic()).foregroundStyle(Theme.text).lineLimit(2)
-                Pill(text: h.provider == Provider.yandex.rawValue ? "Яндекс" : "Google")
+                Pill(text: h.provider == Provider.yandex.rawValue ? L("Яндекс", "Yandex") : "Google")
                 statePill
             }
             HStack(spacing: 16) {
-                Label("\(h.files) из \(h.total) файлов", systemImage: "doc.on.doc")
+                Label(L("\(h.files) из \(h.total) файлов", "\(h.files) of \(h.total) files"), systemImage: "doc.on.doc")
                 Label(fmtBytes(h.bytes), systemImage: "internaldrive")
                 if let s = h.seconds, s > 1 {
-                    Label(fmtBytes(Int64(Double(h.bytes) / s)) + "/с в среднем", systemImage: "speedometer")
+                    Label(fmtBytes(Int64(Double(h.bytes) / s)) + L("/с в среднем", "/s average"), systemImage: "speedometer")
                     Label(fmtDur(s), systemImage: "clock")
                 }
             }.font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.dim).monospacedDigit()
@@ -1486,14 +1501,14 @@ struct HistoryRow: View {
                     Text(h.path).foregroundStyle(Theme.dim).lineLimit(1).truncationMode(.head)
                 } else if let to = movedTo, to.contains("/.Trash") {
                     Image(systemName: "trash.fill").foregroundStyle(.orange)
-                    Text("Папка в Корзине").foregroundStyle(.orange)
+                    Text(L("Папка в Корзине", "Folder is in the Trash")).foregroundStyle(.orange)
                 } else if let to = movedTo {
                     Image(systemName: "arrow.right.circle.fill").foregroundStyle(.orange)
-                    Text("Папку перенесли:").foregroundStyle(.orange)
+                    Text(L("Папку перенесли:", "Folder moved to:")).foregroundStyle(.orange)
                     Button(to) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: to)]) }.buttonStyle(.tap).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.head)
                 } else {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("Папка перемещена или удалена с устройства").foregroundStyle(.orange)
+                    Text(L("Папка перемещена или удалена с устройства", "Folder was moved or deleted from this Mac")).foregroundStyle(.orange)
                     Text(h.path).foregroundStyle(Theme.dim.opacity(0.6)).lineLimit(1).truncationMode(.head).strikethrough()
                 }
             }.font(.system(size: 11))
@@ -1501,9 +1516,9 @@ struct HistoryRow: View {
     }
     @ViewBuilder var statePill: some View {
         switch h.state {
-        case "done": Pill(text: "готово", color: .green)
-        case "failed": Pill(text: "с ошибками", color: .red)
-        default: Pill(text: "остановлено", color: .orange)
+        case "done": Pill(text: L("готово", "done"), color: .green)
+        case "failed": Pill(text: L("с ошибками", "with errors"), color: .red)
+        default: Pill(text: L("остановлено", "stopped"), color: .orange)
         }
     }
 }
@@ -1518,21 +1533,21 @@ struct HistoryPage: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Text("ИСТОРИЯ").font(.system(size: 13, weight: .semibold)).kerning(1.2).foregroundStyle(Theme.dim)
+                    Text(L("ИСТОРИЯ", "HISTORY")).font(.system(size: 13, weight: .semibold)).kerning(1.2).foregroundStyle(Theme.dim)
                     Spacer()
-                    GhostButton(title: "Открыть папку загрузок", icon: "folder") { NSWorkspace.shared.open(URL(fileURLWithPath: defaultDir)) }
-                    if !m.history.isEmpty { GhostButton(title: "Очистить", icon: "trash") { m.history = []; History.save([]); log("ИСТОРИЯ очищена") } }
+                    GhostButton(title: L("Открыть папку загрузок", "Open downloads folder"), icon: "folder") { NSWorkspace.shared.open(URL(fileURLWithPath: defaultDir)) }
+                    if !m.history.isEmpty { GhostButton(title: L("Очистить", "Clear"), icon: "trash") { m.history = []; History.save([]); log("ИСТОРИЯ очищена") } }
                 }
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Theme.dim)
-                    TextField("Поиск по названию или папке", text: $q).textFieldStyle(.plain).foregroundStyle(Theme.text)
+                    TextField(L("Поиск по названию или папке", "Search by name or folder"), text: $q).textFieldStyle(.plain).foregroundStyle(Theme.text)
                 }.padding(12).background(Theme.card, in: RoundedRectangle(cornerRadius: 12))
                 if !active.isEmpty {
-                    Text("СЕЙЧАС КАЧАЕТСЯ").font(.system(size: 11, weight: .semibold)).kerning(1).foregroundStyle(Theme.dim)
+                    Text(L("СЕЙЧАС КАЧАЕТСЯ", "DOWNLOADING NOW")).font(.system(size: 11, weight: .semibold)).kerning(1).foregroundStyle(Theme.dim)
                     ForEach(active) { JobRow(j: $0, m: m) }
                 }
                 if items.isEmpty {
-                    Text(m.history.isEmpty ? "Здесь появятся завершённые загрузки" : "Ничего не найдено")
+                    Text(m.history.isEmpty ? L("Здесь появятся завершённые загрузки", "Finished downloads will appear here") : L("Ничего не найдено", "Nothing found"))
                         .font(.system(size: 13)).foregroundStyle(Theme.dim).frame(maxWidth: .infinity, minHeight: 100)
                         .background(Theme.card, in: RoundedRectangle(cornerRadius: 16))
                 } else {
@@ -1572,6 +1587,7 @@ struct SettingsPage: View {
     @AppStorage("perJob") var perJob = 4
     @AppStorage("maxJobs") var maxJobs = 2
     @AppStorage("conns") var conns = 8
+    @AppStorage("lang") var lang = "ru"
     @AppStorage("totalConns") var totalConns = 16
     @AppStorage("googleKey") var googleKey = ""
     @AppStorage("ghRepo") var ghRepo = ""
@@ -1579,63 +1595,72 @@ struct SettingsPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                PageTitle(text: "Настройки")
+                PageTitle(text: L("Настройки", "Settings"))
                 Card {
-                    SectionHeader(text: "Куда скачивать")
+                    SectionHeader(text: L("Язык", "Language"))
+                    SettingRow(title: L("Язык интерфейса", "Interface language"), sub: L("Русский или английский — меняется сразу", "Russian or English — changes instantly")) {
+                        Picker("", selection: $lang) {
+                            Text("Русский").tag("ru")
+                            Text("English").tag("en")
+                        }.pickerStyle(.segmented).labelsHidden().frame(width: 190)
+                    }.padding(.horizontal, 10).padding(.bottom, 10)
+                }
+                Card {
+                    SectionHeader(text: L("Куда скачивать", "Where to download"))
                     VStack(spacing: 8) {
-                        SettingRow(title: "Папка по умолчанию", sub: defaultDir) {
-                            GhostButton(title: "Выбрать…", icon: "folder") {
+                        SettingRow(title: L("Папка по умолчанию", "Default folder"), sub: defaultDir) {
+                            GhostButton(title: L("Выбрать…", "Choose…"), icon: "folder") {
                                 let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true
                                 p.directoryURL = URL(fileURLWithPath: defaultDir)
                                 if p.runModal() == .OK, let u = p.url { defaultDir = u.path; log("НАСТРОЙКИ папка по умолчанию → \(u.path)") }
                             }
                         }
-                        SettingRow(title: "Спрашивать каждый раз", sub: ask ? "Перед скачиванием откроется окно выбора папки (начнёт с папки по умолчанию)" : "Скачивание сразу в папку по умолчанию, без вопросов") {
+                        SettingRow(title: L("Спрашивать каждый раз", "Ask every time"), sub: ask ? L("Перед скачиванием откроется окно выбора папки (начнёт с папки по умолчанию)", "A folder picker opens before each download (starting from the default folder)") : L("Скачивание сразу в папку по умолчанию, без вопросов", "Downloads go straight to the default folder, no questions asked")) {
                             Toggle("", isOn: $ask).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
                         }
-                        SettingRow(title: "Создавать папку с названием", sub: "Папка с диска кладётся внутрь своей папки, а не россыпью") {
+                        SettingRow(title: L("Создавать папку с названием", "Create a folder with the name"), sub: L("Папка с диска кладётся внутрь своей папки, а не россыпью", "A shared folder is saved inside its own folder, not scattered")) {
                             Toggle("", isOn: $makeRoot).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
                         }
-                        SettingRow(title: "Показать в Finder после загрузки", sub: "Открывать папку, когда задача завершилась без ошибок") {
+                        SettingRow(title: L("Показать в Finder после загрузки", "Show in Finder when done"), sub: L("Открывать папку, когда задача завершилась без ошибок", "Open the folder when a task finishes without errors")) {
                             Toggle("", isOn: $reveal).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
                         }
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
                 Card {
-                    SectionHeader(text: "Скорость")
+                    SectionHeader(text: L("Скорость", "Speed"))
                     VStack(spacing: 8) {
-                        SettingRow(title: "Файлов одновременно", sub: "В одной задаче. Больше — быстрее на мелких файлах") {
+                        SettingRow(title: L("Файлов одновременно", "Files at once"), sub: L("В одной задаче. Больше — быстрее на мелких файлах", "Per task. More is faster for small files")) {
                             Stepper("\(perJob)", value: $perJob, in: 1...8).foregroundStyle(Theme.text).monospacedDigit()
                         }
-                        SettingRow(title: "Задач одновременно", sub: "Остальные ждут в очереди") {
+                        SettingRow(title: L("Задач одновременно", "Tasks at once"), sub: L("Остальные ждут в очереди", "The rest wait in the queue")) {
                             Stepper("\(maxJobs)", value: $maxJobs, in: 1...4).foregroundStyle(Theme.text).monospacedDigit()
                         }
-                        SettingRow(title: "Всего подключений", sub: "Общий потолок на всё приложение. Больше 16–24 серверы обычно начинают придерживать") {
+                        SettingRow(title: L("Всего подключений", "Total connections"), sub: L("Общий потолок на всё приложение. Больше 16–24 серверы обычно начинают придерживать", "Overall limit for the whole app. Above 16–24, servers usually start throttling")) {
                             Stepper("\(totalConns)", value: $totalConns, in: 4...48, step: 4).foregroundStyle(Theme.text).monospacedDigit()
                         }
-                        SettingRow(title: "Потоков на один файл", sub: "Большой файл качается частями параллельно. 8 — обычно максимум скорости") {
+                        SettingRow(title: L("Потоков на один файл", "Threads per file"), sub: L("Большой файл качается частями параллельно. 8 — обычно максимум скорости", "Large files are downloaded in parallel parts. 8 is usually the fastest")) {
                             Stepper("\(conns)", value: $conns, in: 1...16).foregroundStyle(Theme.text).monospacedDigit()
                         }
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
                 Card {
-                    SectionHeader(text: "Запасные пути и обновления")
+                    SectionHeader(text: L("Запасные пути и обновления", "Fallbacks and updates"))
                     VStack(spacing: 8) {
-                        SettingRow(title: "Ключ Google API (необязательно)", sub: "Если Google изменит публичные страницы — приложение пойдёт через официальный Drive API. Ключ бесплатный: console.cloud.google.com → Drive API → Credentials") {
+                        SettingRow(title: L("Ключ Google API (необязательно)", "Google API key (optional)"), sub: L("Если Google изменит публичные страницы — приложение пойдёт через официальный Drive API. Ключ бесплатный: console.cloud.google.com → Drive API → Credentials", "If Google changes its public pages, the app will use the official Drive API. The key is free: console.cloud.google.com → Drive API → Credentials")) {
                             SecureField("AIza…", text: $googleKey).textFieldStyle(.roundedBorder).frame(width: 200)
                         }
-                        SettingRow(title: "Обновления", sub: "Приложение само проверяет новые версии на GitHub (\(Manager.defaultRepo)) и предлагает обновиться внизу окна") {
+                        SettingRow(title: L("Обновления", "Updates"), sub: L("Приложение само проверяет новые версии на GitHub (\(Manager.defaultRepo)) и предлагает обновиться внизу окна", "The app checks GitHub (\(Manager.defaultRepo)) for new versions and offers to update at the bottom of the window")) {
                             HStack {
                                 TextField(Manager.defaultRepo, text: $ghRepo).textFieldStyle(.roundedBorder).frame(width: 170)
-                                GhostButton(title: "Проверить") { Task { await m.checkUpdate(manual: true) }; m.page = .download }
+                                GhostButton(title: L("Проверить", "Check")) { Task { await m.checkUpdate(manual: true) }; m.page = .download }
                             }
                         }
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
                 Card {
-                    SectionHeader(text: "Журнал")
-                    SettingRow(title: "Журнал работы", sub: logURL.path) {
-                        GhostButton(title: "Открыть", icon: "list.bullet.rectangle") { NSWorkspace.shared.open(logURL) }
+                    SectionHeader(text: L("Журнал", "Log"))
+                    SettingRow(title: L("Журнал работы", "Activity log"), sub: logURL.path) {
+                        GhostButton(title: L("Открыть", "Open"), icon: "list.bullet.rectangle") { NSWorkspace.shared.open(logURL) }
                     }.padding(.horizontal, 10).padding(.bottom, 10)
                 }
             }.padding(28)
@@ -1646,13 +1671,13 @@ struct SettingsPage: View {
 struct AboutPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            PageTitle(text: "О программе")
+            PageTitle(text: L("О программе", "About"))
             Card {
                 VStack(alignment: .leading, spacing: 8) {
                     Logo(size: 26)
-                    Text("Скачивание по публичным ссылкам Яндекс Диска и Google Диска. Работает автономно, без нейросетей.")
+                    Text(L("Скачивание по публичным ссылкам Яндекс Диска и Google Диска. Работает автономно, без нейросетей.", "Download files and folders directly from cloud drive links. Works on its own, no AI involved."))
                         .font(.system(size: 13)).foregroundStyle(Theme.dim)
-                    Text("Версия " + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).font(.system(size: 12)).foregroundStyle(Theme.dim)
+                    Text(L("Версия ", "Version ") + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")).font(.system(size: 12)).foregroundStyle(Theme.dim)
                 }.padding(18)
             }
             Spacer()
@@ -1673,6 +1698,9 @@ struct AboutPage: View {
 // --- Каркас
 
 enum Page: String, CaseIterable { case download = "Скачать", history = "История", settings = "Настройки", about = "О программе"
+    var title: String {
+        switch self { case .download: L("Скачать", "Download"); case .history: L("История", "History"); case .settings: L("Настройки", "Settings"); case .about: L("О программе", "About") }
+    }
     var icon: String { switch self { case .download: "arrow.down.circle"; case .history: "clock.arrow.circlepath"; case .settings: "gearshape"; case .about: "info.circle" } }
 }
 
@@ -1695,7 +1723,7 @@ struct SideItem: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: page.icon).font(.system(size: 17)).frame(width: 22)
-                Text(page.rawValue).font(.system(size: 15, weight: .medium))
+                Text(page.title).font(.system(size: 15, weight: .medium))
                 Spacer()
                 if let badge { Text(badge).font(.system(size: 11, weight: .bold)).padding(.horizontal, 7).padding(.vertical, 2)
                     .background(selected ? Color.white.opacity(0.25) : Theme.pink.opacity(0.3), in: Capsule()) }
@@ -1729,6 +1757,7 @@ struct ResizeHandle: View {
 
 struct ContentView: View {
     @StateObject var m = Manager()
+    @AppStorage("lang") var lang = "ru"
     @AppStorage("sideW") var sideW: Double = 230
     @AppStorage("sideHidden") var sideHidden = false
     var running: Int { m.summary.running }
@@ -1740,7 +1769,7 @@ struct ContentView: View {
                         HStack {
                             Logo(size: sideW < 190 ? 16 : sideW < 250 ? 20 : 24)
                             Spacer(minLength: 0)
-                            IconBtn(icon: "sidebar.left", help: "Скрыть меню") { withAnimation(.easeInOut(duration: 0.2)) { sideHidden = true } }
+                            IconBtn(icon: "sidebar.left", help: L("Скрыть меню", "Hide sidebar")) { withAnimation(.easeInOut(duration: 0.2)) { sideHidden = true } }
                         }.padding(.leading, 10).padding(.top, 8).padding(.bottom, 10)
                         Divider().overlay(Theme.line).padding(.bottom, 8)
                         ForEach(Page.allCases, id: \.self) { p in
@@ -1754,7 +1783,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     if sideHidden {
                         HStack(spacing: 10) {
-                            IconBtn(icon: "sidebar.left", help: "Показать меню", color: Theme.text) { withAnimation(.easeInOut(duration: 0.2)) { sideHidden = false } }
+                            IconBtn(icon: "sidebar.left", help: L("Показать меню", "Show sidebar"), color: Theme.text) { withAnimation(.easeInOut(duration: 0.2)) { sideHidden = false } }
                             Logo(size: 15)
                             Spacer()
                         }.padding(.horizontal, 14).padding(.vertical, 8).background(Theme.side)
@@ -1773,18 +1802,18 @@ struct ContentView: View {
             Divider().overlay(Theme.line)
             HStack(spacing: 8) {
                 Circle().fill(running == 0 ? Color.green : Theme.pink).frame(width: 8, height: 8)
-                if running == 0 { Text(m.jobs.isEmpty ? "Готов к работе" : "Всё скачано").foregroundStyle(Theme.dim) }
+                if running == 0 { Text(m.jobs.isEmpty ? L("Готов к работе", "Ready") : L("Всё скачано", "All downloaded")).foregroundStyle(Theme.dim) }
                 else {
-                    Text("Качаю: \(running) · \(m.summary.percent)% · \(fmtBytes(Int64(m.summary.speed)))/с").foregroundStyle(Theme.text).monospacedDigit()
+                    Text(L("Качаю: \(running) · \(m.summary.percent)% · \(fmtBytes(Int64(m.summary.speed)))/с", "Downloading: \(running) · \(m.summary.percent)% · \(fmtBytes(Int64(m.summary.speed)))/s")).foregroundStyle(Theme.text).monospacedDigit()
                 }
                 Spacer()
                 if let u = m.update {
                     if let p = m.updateProgress {
-                        Text(p >= 1 ? "Устанавливаю…" : "Загрузка… \(Int(p * 100)) %").foregroundStyle(Theme.dim).monospacedDigit()
+                        Text(p >= 1 ? L("Устанавливаю…", "Installing…") : L("Загрузка… \(Int(p * 100)) %", "Downloading… \(Int(p * 100)) %")).foregroundStyle(Theme.dim).monospacedDigit()
                         PinkBar(value: p).frame(width: 180)
                     } else {
-                        Button("Доступно обновление \(u.version)") { m.installUpdate() }.buttonStyle(.tap).foregroundStyle(Theme.pink)
-                            .help("Скачать и установить — очередь загрузок продолжится сама")
+                        Button(L("Доступно обновление \(u.version)", "Update available \(u.version)")) { m.installUpdate() }.buttonStyle(.tap).foregroundStyle(Theme.pink)
+                            .help(L("Скачать и установить — очередь загрузок продолжится сама", "Download and install — the download queue will resume automatically"))
                     }
                     Text("·").foregroundStyle(Theme.dim)
                 }
@@ -1794,6 +1823,8 @@ struct ContentView: View {
         }
         .frame(minWidth: 780, minHeight: 640)
         .preferredColorScheme(.dark)
+        .id(lang)                                   // язык поменяли — перерисовываем всё
+        .onChange(of: lang) { _, _ in m.status = L("Вставь публичную ссылку — увидишь, что будет скачано", "Paste a public link to see what will be downloaded") }
         // меню схлопнули — всегда возвращаемся на «Скачать»
         .onChange(of: sideHidden) { _, hidden in if hidden { m.page = .download } }
     }

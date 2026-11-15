@@ -1,36 +1,37 @@
 <p align="center"><img src="icon/AppIcon.iconset/icon_256x256.png" width="128" alt="DiskLoader"></p>
 
 <h1 align="center">DiskLoader</h1>
-<p align="center">Скачивание файлов и папок напрямую по ссылке с облачных дисков.</p>
+<p align="center">Download files and folders directly from cloud drive links.</p>
 
 ---
 
-Вставил ссылку — видишь, что внутри — выбрал нужное — скачал. Без браузера, аккаунтов и лишних окон.
+Paste a link — see what's inside — pick what you need — download. No browser, no accounts, no extra windows.
 
-- папки целиком или отдельные файлы, структура сохраняется
-- большие файлы качаются в несколько потоков
-- пауза и докачка с того же места, даже после перезапуска
-- очередь из нескольких ссылок
-- история загрузок
-- обновляется само
+- whole folders or single files, structure preserved
+- large files download over multiple connections
+- pause and resume from the same spot, even after a restart
+- queue several links at once
+- download history
+- updates itself
+- English and Russian interface
 
-## Скачать
+## Download
 
-**macOS 14+** · Apple Silicon и Intel → [последняя версия](../../releases/latest)
+**macOS 14+** · Apple Silicon & Intel → [latest release](../../releases/latest)
 
-1. Открой `DiskLoader-<версия>.dmg` и перетащи DiskLoader в «Программы».
-2. Первый запуск: **Системные настройки → Конфиденциальность и безопасность → Всё равно открыть** (приложение не подписано сертификатом Apple).
+1. Open `DiskLoader-<version>.dmg` and drag DiskLoader to Applications.
+2. First launch: **System Settings → Privacy & Security → Open Anyway** (the app isn't signed with an Apple certificate).
 
-Windows — позже.
+Windows — coming later.
 
-## Сборка
+## Build
 
 ```
-./build.sh            # собрать и поставить в /Applications
-./build.sh release    # + dist/*.dmg и *.zip для релиза
+./build.sh            # build and install to /Applications
+./build.sh release    # + dist/*.dmg and *.zip for a release
 ```
 
-DMG собирается через [dmgbuild](https://github.com/dmgbuild/dmgbuild): `pip install dmgbuild` в `~/.venvs/dmgbuild`.
+The DMG is built with [dmgbuild](https://github.com/dmgbuild/dmgbuild): `pip install dmgbuild` into `~/.venvs/dmgbuild`.
 
 ---
 

@@ -1,4 +1,4 @@
-// Фон окна установщика DMG: тёмный, стрелка «перетащи в Программы» (640×400, @2x)
+// DMG window background: arrow "drag to Applications" (640×400, @2x)
 import AppKit
 let W: CGFloat = 640, H: CGFloat = 400, k: CGFloat = 2
 let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * k), pixelsHigh: Int(H * k), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -13,7 +13,7 @@ let head = NSBezierPath(); head.move(to: NSPoint(x: 395 * k, y: y)); head.line(t
 let style = NSMutableParagraphStyle(); style.alignment = .center
 let t1: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 22 * k, weight: .semibold), .foregroundColor: NSColor(white: 0.12, alpha: 1), .paragraphStyle: style]
 let t2: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13 * k), .foregroundColor: NSColor(white: 0.42, alpha: 1), .paragraphStyle: style]
-("Перетащи DiskLoader в «Программы»" as NSString).draw(in: NSRect(x: 0, y: (H - 70) * k, width: W * k, height: 34 * k), withAttributes: t1)
-("Если DiskLoader уже установлен — нажми «Заменить», загрузки и история сохранятся" as NSString).draw(in: NSRect(x: 40 * k, y: 40 * k, width: (W - 80) * k, height: 40 * k), withAttributes: t2)
+("Drag DiskLoader to Applications" as NSString).draw(in: NSRect(x: 0, y: (H - 70) * k, width: W * k, height: 34 * k), withAttributes: t1)
+("Already installed? Choose “Replace” — your downloads and history are kept" as NSString).draw(in: NSRect(x: 40 * k, y: 40 * k, width: (W - 80) * k, height: 40 * k), withAttributes: t2)
 NSGraphicsContext.restoreGraphicsState(); rep.size = NSSize(width: W, height: H)
 try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
