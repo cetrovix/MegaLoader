@@ -683,6 +683,9 @@ enum Media {
         if l.contains("timed out") || l.contains("connection reset") || l.contains("transporterror") || l.contains("unable to download webpage") {
             return L("Площадка не ответила — похоже, проблема с сетью или VPN. Попробуй ещё раз чуть позже.", "The site didn't respond \u{2014} looks like a network or VPN issue. Try again a bit later.")
         }
+        if l.contains("ip address is blocked") || l.contains("not available in your country") || l.contains("geo") && l.contains("restrict") {
+            return L("Площадка не отдаёт этот ролик для твоей страны или IP. Включи VPN другой страны и попробуй снова.", "The site blocks this video for your country or IP. Turn on a VPN in another country and try again.")
+        }
         if l.contains("sign in") || l.contains("login") || l.contains("cookies") || l.contains("confirm you") {
             return L("Площадка просит вход. Включи «Вход через браузер» в Настройках и попробуй снова.", "The site requires sign-in. Turn on \u{201c}Sign in via browser\u{201d} in Settings and try again.") }
         if l.contains("private") { return L("Это приватное видео — скачать без доступа нельзя.", "This video is private.") }
@@ -1355,7 +1358,45 @@ final class Manager: NSObject, ObservableObject {
         let def = ud.string(forKey: "defaultDir").map { URL(fileURLWithPath: $0) }
         let ask = ud.object(forKey: "askEachTime") as? Bool ?? true
         var dir: URL
-        if !ask, let d = def, FileManager.default.fileExists(atPath: d.path) { dir = d }
+        var chosen = chosen
+        // видео/трек одним файлом + «Спрашивать имя файла»: системное окно с выделенным оригинальным названием
+        let askName = ud.bool(forKey: "askMediaName") && p.category != .drive && previewTitle.isEmpty && chosen.count == 1
+        let ext = (p == .music || mediaQuality == "audio") ? "mp3" : "mp4"
+        var newName: String? = nil
+        if askName, let f = chosen.first {
+            if ask || def == nil || !FileManager.default.fileExists(atPath: def!.path) {
+                let sp = NSSavePanel()
+                sp.canCreateDirectories = true; sp.isExtensionHidden = false
+                sp.title = L("Сохранить как", "Save as"); sp.prompt = L("Скачать", "Download")
+                sp.message = L("Куда скачать и как назвать файл?", "Where to download and what to name the file?")
+                sp.nameFieldStringValue = f.relPath + "." + ext          // macOS сам выделяет имя без расширения
+                sp.directoryURL = lastDir ?? def
+                NSApp.activate(ignoringOtherApps: true)
+                guard sp.runModal() == .OK, let u = sp.url else { log("  сохранение отменено"); return }
+                dir = u.deletingLastPathComponent(); newName = u.deletingPathExtension().lastPathComponent
+            } else {
+                dir = def!
+                let a = NSAlert()
+                a.messageText = L("Как назвать файл?", "Name the file")
+                a.informativeText = L("Можно напечатать или вставить своё название.", "Type or paste your own name.")
+                a.addButton(withTitle: L("Скачать", "Download")); a.addButton(withTitle: L("Отмена", "Cancel")).keyEquivalent = "\u{1b}"   // Escape = отмена
+                let field = NSTextField(string: f.relPath); field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+                let extLabel = NSTextField(labelWithString: "." + ext); extLabel.textColor = .secondaryLabelColor
+                let row = NSStackView(views: [field, extLabel]); row.orientation = .horizontal; row.spacing = 4
+                row.frame = NSRect(x: 0, y: 0, width: 360, height: 24); a.accessoryView = row
+                a.window.initialFirstResponder = field
+                NSApp.activate(ignoringOtherApps: true)
+                DispatchQueue.main.async { field.selectText(nil) }
+                guard a.runModal() == .alertFirstButtonReturn else { log("  ввод имени отменён"); return }
+                let t = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                newName = t.isEmpty ? f.relPath : t
+            }
+            if let n = newName {
+                let clean = safeName(n.hasSuffix("." + ext) ? String(n.dropLast(ext.count + 1)) : n)
+                chosen = [RemoteFile(id: f.id, relPath: clean, size: f.size, source: f.source)]
+                log("  имя файла: \(clean).\(ext)")
+            }
+        } else if !ask, let d = def, FileManager.default.fileExists(atPath: d.path) { dir = d }
         else {
             let panel = NSOpenPanel()
             panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
@@ -1366,11 +1407,10 @@ final class Manager: NSObject, ObservableObject {
             dir = u
         }
         lastDir = dir
-        let title = previewTitle.isEmpty ? (preview.first?.relPath ?? L("файл", "file")) : previewTitle
+        let title = previewTitle.isEmpty ? (chosen.first?.relPath ?? L("файл", "file")) : previewTitle
         let rootFolder = UserDefaults.standard.object(forKey: "makeRoot") as? Bool ?? true
         let base = (previewTitle.isEmpty || !rootFolder) ? dir : dir.appendingPathComponent(safeName(previewTitle))
         let part = chosen.count == preview.count ? "" : L(" (выбрано \(chosen.count) из \(preview.count))", " (\(chosen.count) of \(preview.count) selected)")
-        var chosen = chosen
         if p == .video { chosen = chosen.map { f in
             if case .media(let u, _, let site) = f.source { return RemoteFile(id: f.id, relPath: f.relPath, size: f.size, source: .media(url: u, quality: mediaQuality, site: site)) }
             return f } }
@@ -2284,6 +2324,7 @@ struct SettingsPage: View {
     @AppStorage("googleKey") var googleKey = ""
     @AppStorage("ghRepo") var ghRepo = ""
     @AppStorage("cookiesBrowser") var cookiesBrowser = ""
+    @AppStorage("askMediaName") var askMediaName = false
     @ObservedObject var m: Manager
     var body: some View {
         ScrollView {
@@ -2338,6 +2379,11 @@ struct SettingsPage: View {
                 }
                 Card {
                     SectionHeader(text: L("Видео и музыка", "Video and music"))
+                    SettingRow(title: L("Спрашивать имя файла", "Ask for a file name"),
+                               sub: askMediaName ? L("Перед скачиванием видео или трека — окно с оригинальным названием, выделенным для замены", "Before each video or track \u{2014} a dialog with the original name selected for editing")
+                                                 : L("Файл называется как на площадке", "The file keeps its original name from the site")) {
+                        Toggle("", isOn: $askMediaName).toggleStyle(.switch).tint(Theme.pink).labelsHidden()
+                    }.padding(.horizontal, 10)
                     SettingRow(title: L("Вход через браузер", "Sign in via browser"),
                                sub: L("Для роликов, которые площадка показывает только после входа (часть Instagram, TikTok, YouTube 18+). Приложение возьмёт вход из выбранного браузера. По умолчанию выключено.",
                                       "For videos a site only shows after sign-in (some Instagram, TikTok, YouTube 18+). The app uses your sign-in from the chosen browser. Off by default.")) {

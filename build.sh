@@ -4,7 +4,7 @@
 #   ./build.sh release    → ещё и dist/MegaLoader-<версия>.zip для GitHub Releases
 set -e
 cd "$(dirname "$0")"
-VER=1.7.3
+VER=1.8
 OUT="build.noindex/MegaLoader.app"
 rm -rf build.noindex; mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 for a in arm64 x86_64; do
