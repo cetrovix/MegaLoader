@@ -3,6 +3,7 @@
 import SwiftUI
 import AppKit
 import Foundation
+import SystemConfiguration
 
 // MARK: - Модель
 
@@ -513,6 +514,44 @@ enum PCloud {
     }
 }
 
+// MARK: - Сеть: VPN, системный прокси
+
+enum Net {
+    /// включён ли VPN: есть туннельный интерфейс (utun/ipsec/ppp/tun/wg) с обычным IPv4-адресом. Мгновенно
+    static var vpnOn: Bool {
+        var p: UnsafeMutablePointer<ifaddrs>? = nil
+        guard getifaddrs(&p) == 0, let first = p else { return false }
+        defer { freeifaddrs(p) }
+        var cur: UnsafeMutablePointer<ifaddrs>? = first
+        while let c = cur {
+            let name = String(cString: c.pointee.ifa_name)
+            if ["utun", "ipsec", "ppp", "tun", "tap", "wg"].contains(where: { name.hasPrefix($0) }),
+               let a = c.pointee.ifa_addr, a.pointee.sa_family == UInt8(AF_INET) {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                getnameinfo(a, socklen_t(a.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                if !String(cString: host).hasPrefix("169.254") { return true }
+            }
+            cur = c.pointee.ifa_next
+        }
+        return false
+    }
+    /// системный прокси (VPN в режиме прокси) — для движка видео
+    static var proxy: String? {
+        guard let d = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any] else { return nil }
+        if (d["SOCKSEnable"] as? Int) == 1, let h = d["SOCKSProxy"] as? String, let port = d["SOCKSPort"] as? Int { return "socks5://\(h):\(port)" }
+        if (d["HTTPSEnable"] as? Int) == 1, let h = d["HTTPSProxy"] as? String, let port = d["HTTPSPort"] as? Int { return "http://\(h):\(port)" }
+        if (d["HTTPEnable"] as? Int) == 1, let h = d["HTTPProxy"] as? String, let port = d["HTTPPort"] as? Int { return "http://\(h):\(port)" }
+        return nil
+    }
+    /// сайты, которые в России обычно открываются только с VPN
+    static let blockedRU = ["instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com", "linkedin.com", "discord", "soundcloud.com", "patreon.com"]
+    static func needsVPN(_ link: String) -> Bool { blockedRU.contains { link.lowercased().contains($0) } }
+    static func isNetError(_ t: String) -> Bool {
+        let l = t.lowercased()
+        return ["could not resolve host", "dns", "timed out", "connection reset", "failed to perform", "transporterror", "nodename nor servname", "network is unreachable", "connection refused"].contains { l.contains($0) }
+    }
+}
+
 // MARK: - Медиа: видео и музыка с площадок (движок yt-dlp + ffmpeg, качаются при первом использовании)
 
 struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = [] }
@@ -523,6 +562,22 @@ enum Media {
     static var ytdlpDir: URL { bin.appendingPathComponent("yt-dlp-app") }
     static var ytdlp: URL { ytdlpDir.appendingPathComponent("yt-dlp_macos") }   // версия-папка: стартует за доли секунды
     static var ffmpeg: URL { bin.appendingPathComponent("ffmpeg") }
+    /// копия движка без маскировки под браузер: ходит через системную сеть (дружит с любым VPN). Запасной путь
+    static var sysDir: URL { bin.appendingPathComponent("yt-dlp-sys") }
+    static var ytdlpSys: URL { sysDir.appendingPathComponent("yt-dlp_macos") }
+    /// сайты, где запасной путь уже помог — сразу идём им
+    nonisolated(unsafe) static var preferSys: Set<String> = []
+    static func host(_ link: String) -> String { (URL(string: link)?.host ?? link).replacingOccurrences(of: "www.", with: "") }
+    static func makeSysCopy() {
+        let fm = FileManager.default
+        try? fm.removeItem(at: sysDir)
+        guard (try? fm.createDirectory(at: sysDir.appendingPathComponent("_internal"), withIntermediateDirectories: true)) != nil,
+              (try? fm.copyItem(at: ytdlp, to: ytdlpSys)) != nil,
+              let items = try? fm.contentsOfDirectory(atPath: ytdlpDir.appendingPathComponent("_internal").path) else { return }
+        for it in items where !it.hasPrefix("curl_cffi") {
+            try? fm.createSymbolicLink(at: sysDir.appendingPathComponent("_internal/" + it), withDestinationURL: ytdlpDir.appendingPathComponent("_internal/" + it))
+        }
+    }
     static var ready: Bool { FileManager.default.isExecutableFile(atPath: ytdlp.path) && FileManager.default.isExecutableFile(atPath: ffmpeg.path) }
 
     /// движки скачиваются один раз (~60 МБ); yt-dlp обновляется сам раз в сутки — площадки часто меняют защиту
@@ -542,6 +597,7 @@ enum Media {
             UserDefaults.standard.set(Date(), forKey: "ytdlpChecked")
         }
         try? FileManager.default.removeItem(at: bin.appendingPathComponent("yt-dlp"))   // старая медленная версия-файл
+        if !FileManager.default.isExecutableFile(atPath: ytdlpSys.path) { makeSysCopy() }
         if !FileManager.default.isExecutableFile(atPath: ffmpeg.path) {
             log("МЕДИА: качаю ffmpeg")
             #if arch(arm64)
@@ -584,17 +640,20 @@ enum Media {
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmp.appendingPathComponent("yt-dlp_macos").path)
         try? FileManager.default.removeItem(at: ytdlpDir)
         try FileManager.default.moveItem(at: tmp, to: ytdlpDir)
+        makeSysCopy()
     }
 
     static func cookieArgs() -> [String] {
         let b = UserDefaults.standard.string(forKey: "cookiesBrowser") ?? ""
-        return b.isEmpty ? [] : ["--cookies-from-browser", b]
+        var a = b.isEmpty ? [] : ["--cookies-from-browser", b]
+        if let p = Net.proxy { a += ["--proxy", p] }       // VPN в режиме системного прокси
+        return a
     }
 
     /// запустить yt-dlp и дождаться
-    static func run(_ args: [String]) async throws -> (out: String, err: String, code: Int32) {
+    static func run(_ args: [String], sys: Bool = false) async throws -> (out: String, err: String, code: Int32) {
         try await withCheckedThrowingContinuation { c in
-            let p = Process(); p.executableURL = ytdlp; p.arguments = args
+            let p = Process(); p.executableURL = sys && FileManager.default.isExecutableFile(atPath: ytdlpSys.path) ? ytdlpSys : ytdlp; p.arguments = args
             let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
             DispatchQueue.global().async {
                 do { try p.run() } catch { c.resume(throwing: error); return }
@@ -605,6 +664,13 @@ enum Media {
         }
     }
 
+    static func errorText(_ err: String, link: String) -> String {
+        let t = errorText(err)
+        if Net.isNetError(err) && Net.needsVPN(link) && !Net.vpnOn {
+            return L("\(host(link)) в России обычно открывается только через VPN — включи VPN и попробуй снова.", "\(host(link)) is usually blocked in Russia \u{2014} turn on a VPN and try again.")
+        }
+        return t
+    }
     static func errorText(_ err: String) -> String {
         let line = err.split(separator: "\n").last { $0.contains("ERROR") }.map(String.init) ?? err.split(separator: "\n").last.map(String.init) ?? ""
         let l = line.lowercased()
@@ -639,8 +705,17 @@ enum Media {
         if link.contains("spotify") { return try await Spotify.list(link) }
         try await ensure(status)
         status(L("Читаю ссылку…", "Reading the link…"))
-        let r = try await run(["-J", "--flat-playlist", "--no-warnings"] + cookieArgs() + [link])
-        guard r.code == 0, let j = try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any] else { throw LoaderError.parse(errorText(r.err)) }
+        let h = host(link)
+        let args = ["-J", "--flat-playlist", "--no-warnings"] + cookieArgs() + [link]
+        var r = try await run(args, sys: preferSys.contains(h))
+        if r.code != 0, Net.isNetError(r.err), !preferSys.contains(h) {
+            log("МЕДИА: \(h) не открылся обычным путём — пробую через системную сеть (VPN: \(Net.vpnOn ? "есть" : "нет"))")
+            status(L("Пробую обходной путь…", "Trying another route…"))
+            let r2 = try await run(args, sys: true)
+            if r2.code == 0 { preferSys.insert(h); log("МЕДИА: \(h) — обходной путь сработал, дальше сразу им") }
+            r = r2
+        }
+        guard r.code == 0, let j = try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any] else { throw LoaderError.parse(errorText(r.err, link: link)) }
         let site = prettySite((j["extractor_key"] as? String ?? j["ie_key"] as? String ?? "").replacingOccurrences(of: "Tab", with: ""))
         let q = music ? "audio" : "2160"
         if (j["_type"] as? String) == "playlist" {
@@ -667,6 +742,16 @@ enum Media {
     /// скачать одно видео/трек; прогресс — в raw, пауза — остановкой процесса (докачка через .part)
     static func download(url: String, quality: String, dir: URL, name: String, raw: Raw, fid: UUID) async throws -> URL {
         try await ensure { _ in }
+        let h = host(url)
+        do { return try await downloadOnce(url: url, quality: quality, dir: dir, name: name, raw: raw, fid: fid, sys: preferSys.contains(h)) }
+        catch LoaderError.parse(let msg) where msg.hasPrefix("NET|") && !preferSys.contains(h) {
+            log("МЕДИА: скачивание с \(h) — повтор через системную сеть")
+            let out = try await downloadOnce(url: url, quality: quality, dir: dir, name: name, raw: raw, fid: fid, sys: true)
+            preferSys.insert(h); return out
+        }
+        catch LoaderError.parse(let msg) where msg.hasPrefix("NET|") { throw LoaderError.parse(errorText(String(msg.dropFirst(4)), link: url)) }
+    }
+    static func downloadOnce(url: String, quality: String, dir: URL, name: String, raw: Raw, fid: UUID, sys: Bool) async throws -> URL {
         var args = [url, "--no-playlist", "--newline", "--no-warnings", "--progress", "-c",
                     "--progress-template", "download:DLP|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
                     "--print", "after_move:FINAL|%(filepath)s",
@@ -676,7 +761,7 @@ enum Media {
             args += ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--concurrent-fragments", "8",
                      "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
         }
-        let p = Process(); p.executableURL = ytdlp; p.arguments = args
+        let p = Process(); p.executableURL = sys && FileManager.default.isExecutableFile(atPath: ytdlpSys.path) ? ytdlpSys : ytdlp; p.arguments = args
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
         var final: String? = nil; var errText = ""
         var phaseBase: Int64 = 0, lastD: Int64 = 0, lastT: Int64 = 0
@@ -706,7 +791,10 @@ enum Media {
         } onCancel: { p.terminate() }
         o.fileHandleForReading.readabilityHandler = nil; e.fileHandleForReading.readabilityHandler = nil
         if raw.cancelled || Task.isCancelled { throw CancellationError() }
-        guard p.terminationStatus == 0 else { throw LoaderError.parse(errorText(errText)) }
+        guard p.terminationStatus == 0 else {
+            if Net.isNetError(errText) { throw LoaderError.parse("NET|" + errText) }   // наверху решат: повтор запасным путём
+            throw LoaderError.parse(errorText(errText, link: url))
+        }
         let out = final.map { URL(fileURLWithPath: $0) } ?? dir.appendingPathComponent(name)
         // итоговый размер — по самому файлу (если ролик уже был скачан, прогресса от yt-dlp нет)
         let sz = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? raw.snapshot().0
