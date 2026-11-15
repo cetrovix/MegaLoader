@@ -543,12 +543,19 @@ enum Net {
         if (d["HTTPEnable"] as? Int) == 1, let h = d["HTTPProxy"] as? String, let port = d["HTTPPort"] as? Int { return "http://\(h):\(port)" }
         return nil
     }
-    /// сайты, которые в России обычно открываются только с VPN
-    static let blockedRU = ["instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com", "linkedin.com", "discord", "soundcloud.com", "patreon.com"]
-    static func needsVPN(_ link: String) -> Bool { blockedRU.contains { link.lowercased().contains($0) } }
+    /// сервисы, которые в России заблокированы, замедлены или режут по IP — работают только через VPN
+    static let blockedRU: [(String, String)] = [
+        ("youtube.com", "YouTube"), ("youtu.be", "YouTube"), ("music.youtube", "YouTube Music"), ("ytsearch", "YouTube"),
+        ("instagram.com", "Instagram"), ("facebook.com", "Facebook"), ("fb.watch", "Facebook"), ("x.com", "X (Twitter)"),
+        ("twitter.com", "X (Twitter)"), ("tiktok.com", "TikTok"), ("linkedin.com", "LinkedIn"), ("discord", "Discord"),
+        ("soundcloud.com", "SoundCloud"), ("vimeo.com", "Vimeo"), ("patreon.com", "Patreon"), ("dailymotion.com", "Dailymotion"),
+        ("tumblr.com", "Tumblr"), ("spotify", "Spotify"), ("threads.net", "Threads")]
+    static func blockedName(_ link: String) -> String? { let l = link.lowercased(); return blockedRU.first { l.contains($0.0) }?.1 }
+    static func needsVPN(_ link: String) -> Bool { blockedName(link) != nil }
     static func isNetError(_ t: String) -> Bool {
         let l = t.lowercased()
-        return ["could not resolve host", "dns", "timed out", "connection reset", "failed to perform", "transporterror", "nodename nor servname", "network is unreachable", "connection refused"].contains { l.contains($0) }
+        return ["could not resolve host", "dns", "timed out", "timeout", "connection reset", "failed to perform", "transporterror", "nodename nor servname",
+                "network is unreachable", "connection refused", "ip address is blocked", "not available in your country", "unable to download webpage", "read operation timed out"].contains { l.contains($0) }
     }
 }
 
@@ -651,23 +658,35 @@ enum Media {
     }
 
     /// запустить yt-dlp и дождаться
-    static func run(_ args: [String], sys: Bool = false) async throws -> (out: String, err: String, code: Int32) {
+    static func run(_ args: [String], sys: Bool = false, timeout: TimeInterval = 0) async throws -> (out: String, err: String, code: Int32) {
         try await withCheckedThrowingContinuation { c in
             let p = Process(); p.executableURL = sys && FileManager.default.isExecutableFile(atPath: ytdlpSys.path) ? ytdlpSys : ytdlp; p.arguments = args
             let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
             DispatchQueue.global().async {
                 do { try p.run() } catch { c.resume(throwing: error); return }
+                if timeout > 0 {   // площадка молчит (замедлена/заблокирована) — не ждём бесконечно
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if p.isRunning { p.terminate() } }
+                }
                 let od = o.fileHandleForReading.readDataToEndOfFile(); let ed = e.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
-                c.resume(returning: (String(decoding: od, as: UTF8.self), String(decoding: ed, as: UTF8.self), p.terminationStatus))
+                var err = String(decoding: ed, as: UTF8.self)
+                if p.terminationReason == .uncaughtSignal { err += "\nERROR: timed out (no response)" }
+                c.resume(returning: (String(decoding: od, as: UTF8.self), err, p.terminationStatus))
             }
         }
     }
 
     static func errorText(_ err: String, link: String) -> String {
         let t = errorText(err)
-        if Net.isNetError(err) && Net.needsVPN(link) && !Net.vpnOn {
-            return L("\(host(link)) в России обычно открывается только через VPN — включи VPN и попробуй снова.", "\(host(link)) is usually blocked in Russia \u{2014} turn on a VPN and try again.")
+        let l = err.lowercased()
+        let blockedLike = Net.isNetError(err) || l.contains("sign in to confirm") || l.contains("not a bot") || l.contains("403")
+        if blockedLike, let name = Net.blockedName(link) {
+            if Net.vpnOn {
+                return L("\(name) не ответил даже через VPN. Похоже, твой VPN-сервер тоже заблокирован этим сервисом — выбери VPN другой страны и попробуй снова.",
+                         "\(name) didn't respond even through the VPN. Your VPN server may be blocked too \u{2014} pick a server in another country and try again.")
+            }
+            return L("\(name) в России заблокирован или замедлен, поэтому без VPN не работает. Включи VPN (лучше другой страны) и попробуй снова.",
+                     "\(name) is blocked or throttled in Russia, so it doesn't work without a VPN. Turn on a VPN (preferably another country) and try again.")
         }
         return t
     }
@@ -709,12 +728,17 @@ enum Media {
         try await ensure(status)
         status(L("Читаю ссылку…", "Reading the link…"))
         let h = host(link)
-        let args = ["-J", "--flat-playlist", "--no-warnings"] + cookieArgs() + [link]
-        var r = try await run(args, sys: preferSys.contains(h))
-        if r.code != 0, Net.isNetError(r.err), !preferSys.contains(h) {
+        if let name = Net.blockedName(link), !Net.vpnOn {
+            status(L("Читаю ссылку… Если ты в России — \(name) работает только через VPN", "Reading the link… If you're in Russia, \(name) only works through a VPN"))
+        }
+        let args = ["-J", "--flat-playlist", "--no-warnings", "--socket-timeout", "15"] + cookieArgs() + [link]
+        var r = try await run(args, sys: preferSys.contains(h), timeout: 25)
+        // обходной путь нужен, когда VPN есть, но движок его «не видит»; без VPN повтор только тянет время
+        let fallbackMakesSense = Net.vpnOn || Net.proxy != nil || !Net.needsVPN(link)
+        if r.code != 0, Net.isNetError(r.err), !preferSys.contains(h), fallbackMakesSense {
             log("МЕДИА: \(h) не открылся обычным путём — пробую через системную сеть (VPN: \(Net.vpnOn ? "есть" : "нет"))")
             status(L("Пробую обходной путь…", "Trying another route…"))
-            let r2 = try await run(args, sys: true)
+            let r2 = try await run(args, sys: true, timeout: 25)
             if r2.code == 0 { preferSys.insert(h); log("МЕДИА: \(h) — обходной путь сработал, дальше сразу им") }
             r = r2
         }
@@ -747,7 +771,7 @@ enum Media {
         try await ensure { _ in }
         let h = host(url)
         do { return try await downloadOnce(url: url, quality: quality, dir: dir, name: name, raw: raw, fid: fid, sys: preferSys.contains(h)) }
-        catch LoaderError.parse(let msg) where msg.hasPrefix("NET|") && !preferSys.contains(h) {
+        catch LoaderError.parse(let msg) where msg.hasPrefix("NET|") && !preferSys.contains(h) && (Net.vpnOn || Net.proxy != nil || !Net.needsVPN(url)) {
             log("МЕДИА: скачивание с \(h) — повтор через системную сеть")
             let out = try await downloadOnce(url: url, quality: quality, dir: dir, name: name, raw: raw, fid: fid, sys: true)
             preferSys.insert(h); return out
@@ -756,6 +780,7 @@ enum Media {
     }
     static func downloadOnce(url: String, quality: String, dir: URL, name: String, raw: Raw, fid: UUID, sys: Bool) async throws -> URL {
         var args = [url, "--no-playlist", "--newline", "--no-warnings", "--progress", "-c",
+                    "--socket-timeout", "20", "--retries", "3", "--fragment-retries", "5",
                     "--progress-template", "download:DLP|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
                     "--print", "after_move:FINAL|%(filepath)s",
                     "-P", dir.path, "-o", name + ".%(ext)s", "--ffmpeg-location", ffmpeg.path] + cookieArgs()
@@ -768,6 +793,7 @@ enum Media {
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
         var final: String? = nil; var errText = ""
         var phaseBase: Int64 = 0, lastD: Int64 = 0, lastT: Int64 = 0
+        var lastActivity = Date()
         let lock = NSLock()
         o.fileHandleForReading.readabilityHandler = { h in
             let d = h.availableData; if d.isEmpty { return }
@@ -778,7 +804,7 @@ enum Media {
                     let dn = max(0, v[1]); let tot = v[2] > 0 ? v[2] : max(0, v[3])
                     lock.lock()
                     if dn + 1_000_000 < lastD { phaseBase += max(lastT, lastD) }   // началась следующая часть (видео → звук)
-                    lastD = dn; lastT = tot
+                    lastD = dn; lastT = tot; lastActivity = Date()
                     raw.setBytes(fid, phaseBase + dn, expected: phaseBase + tot)
                     lock.unlock()
                 } else if line.hasPrefix("FINAL|") { final = String(line.dropFirst(6)) }
@@ -789,12 +815,15 @@ enum Media {
         await withTaskCancellationHandler {
             while p.isRunning {
                 if raw.cancelled { p.terminate() }
+                lock.lock(); let idle = Date().timeIntervalSince(lastActivity); let downloading = lastT == 0 || lastD < lastT; lock.unlock()
+                // данные не идут — площадка режет; склейку ffmpeg (идёт молча) не трогаем
+                if idle > 75 && downloading { lock.lock(); errText += "\nERROR: timed out (no data for 75 s)"; lock.unlock(); p.terminate() }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         } onCancel: { p.terminate() }
         o.fileHandleForReading.readabilityHandler = nil; e.fileHandleForReading.readabilityHandler = nil
         if raw.cancelled || Task.isCancelled { throw CancellationError() }
-        guard p.terminationStatus == 0 else {
+        guard p.terminationStatus == 0 && p.terminationReason == .exit else {
             if Net.isNetError(errText) { throw LoaderError.parse("NET|" + errText) }   // наверху решат: повтор запасным путём
             throw LoaderError.parse(errorText(errText, link: url))
         }
