@@ -515,7 +515,7 @@ enum PCloud {
 
 // MARK: - Медиа: видео и музыка с площадок (движок yt-dlp + ffmpeg, качаются при первом использовании)
 
-struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool }
+struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = [] }
 
 enum Media {
     static let musicHosts = ["soundcloud.com", "bandcamp.com", "mixcloud.com", "audiomack.com", "open.spotify.com", "spotify.link", "music.youtube.com", "music.apple.com"]
@@ -633,7 +633,7 @@ enum Media {
         let r = try await run(["-J", "--flat-playlist", "--no-warnings"] + cookieArgs() + [link])
         guard r.code == 0, let j = try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [String: Any] else { throw LoaderError.parse(errorText(r.err)) }
         let site = prettySite((j["extractor_key"] as? String ?? j["ie_key"] as? String ?? "").replacingOccurrences(of: "Tab", with: ""))
-        let q = music ? "audio" : "best"
+        let q = music ? "audio" : "2160"
         if (j["_type"] as? String) == "playlist" {
             let entries = (j["entries"] as? [[String: Any]] ?? [])
             let files = entries.enumerated().map { i, e -> RemoteFile in
@@ -646,8 +646,13 @@ enum Media {
         }
         let title = clean(j["title"] as? String ?? "video")
         let thumb = (j["thumbnail"] as? String).flatMap(URL.init(string:))
+        // какие качества реально есть у ролика (по стандартным ступеням)
+        let hs = Set((j["formats"] as? [[String: Any]] ?? []).compactMap { $0["height"] as? Int })
+        // каждую реальную высоту относим к ближайшей ступени не выше её
+        let std = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+        let steps = Array(Set(hs.compactMap { h in std.first { $0 <= Int(Double(h) * 1.05) } })).sorted(by: >)
         let f = RemoteFile(relPath: title, size: nil, source: .media(url: (j["webpage_url"] as? String) ?? link, quality: q, site: site))
-        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false))
+        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps))
     }
 
     /// скачать одно видео/трек; прогресс — в raw, пауза — остановкой процесса (докачка через .part)
@@ -659,8 +664,8 @@ enum Media {
                     "-P", dir.path, "-o", name + ".%(ext)s", "--ffmpeg-location", ffmpeg.path] + cookieArgs()
         if quality == "audio" { args += ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"] }
         else {
-            args += ["-f", "bv*+ba/b", "--merge-output-format", "mp4",
-                     "-S", (quality == "best" ? "res" : "res:\(quality)") + ",vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
+            args += ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--concurrent-fragments", "8",
+                     "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
         }
         let p = Process(); p.executableURL = ytdlp; p.arguments = args
         let o = Pipe(), e = Pipe(); p.standardOutput = o; p.standardError = e
@@ -693,9 +698,11 @@ enum Media {
         o.fileHandleForReading.readabilityHandler = nil; e.fileHandleForReading.readabilityHandler = nil
         if raw.cancelled || Task.isCancelled { throw CancellationError() }
         guard p.terminationStatus == 0 else { throw LoaderError.parse(errorText(errText)) }
-        let (b, _, _, _) = raw.snapshot(); raw.setBytes(fid, max(b, 1), expected: max(b, 1))
-        if let f = final { return URL(fileURLWithPath: f) }
-        return dir.appendingPathComponent(name)
+        let out = final.map { URL(fileURLWithPath: $0) } ?? dir.appendingPathComponent(name)
+        // итоговый размер — по самому файлу (если ролик уже был скачан, прогресса от yt-dlp нет)
+        let sz = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? NSNumber)?.int64Value ?? raw.snapshot().0
+        raw.setBytes(fid, max(sz, 1), expected: max(sz, 1))
+        return out
     }
 }
 
@@ -742,7 +749,7 @@ func dispositionName(_ h: String?) -> String? {
 func safeName(_ s: String) -> String { s.replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: "/", with: "-") }
 
 func fmtBytes(_ b: Int64) -> String {
-    let f = ByteCountFormatter(); f.countStyle = .file; f.allowedUnits = [.useKB, .useMB, .useGB, .useTB]; return f.string(fromByteCount: b)
+    let f = ByteCountFormatter(); f.countStyle = .file; f.allowedUnits = [.useKB, .useMB, .useGB, .useTB]; f.allowsNonnumericFormatting = false; return f.string(fromByteCount: b)
 }
 
 // MARK: - Журнал (~/Library/Logs/MegaLoader.log)
@@ -1100,7 +1107,7 @@ final class Manager: NSObject, ObservableObject {
     @Published var selected: Set<UUID> = []      // выбранные файлы
     @Published var cwd: [String] = []             // текущая папка в браузере
     @Published var media: MediaInfo? = nil        // превью видео/трека
-    @AppStorage("mediaQuality") var mediaQuality = "best"
+    @AppStorage("mediaQuality") var mediaQuality = "2160"
     // очередь
     @Published var jobs: [Job] = []
     @Published var lastDir: URL?
@@ -1209,6 +1216,7 @@ final class Manager: NSObject, ObservableObject {
                 case .video, .music:
                     let (res, info) = try await Media.list(l, music: p == .music) { st in Task { @MainActor in self.status = st } }
                     r = res; media = info
+                    if p == .video { mediaQuality = info.heights.first.map(String.init) ?? "2160" }
                 }
                 guard link.trimmingCharacters(in: .whitespacesAndNewlines) == l else { busy = false; return }
                 previewTitle = r.rootName
@@ -1693,10 +1701,15 @@ func siteOf(_ files: [RemoteFile]) -> String? {
 
 struct QualityPicker: View {
     @ObservedObject var m: Manager
-    static let options: [(String, String, String)] = [("best", "Лучшее", "Best"), ("2160", "4K", "4K"), ("1080", "1080p", "1080p"), ("720", "720p", "720p"), ("audio", "Только звук", "Audio only")]
+    var heights: [Int] = []          // пусто — плейлист: общий набор «до …»
+    static func label(_ h: Int) -> String { h == 2160 ? "4K" : h == 1440 ? "2K" : "\(h)p" }
+    var options: [(String, String, String)] {
+        let hs = heights.isEmpty ? [2160, 1080, 720] : heights   // пусто — плейлист: «до 4K / до 1080p / до 720p»
+        return hs.map { (String($0), QualityPicker.label($0), QualityPicker.label($0)) } + [("audio", "Только звук", "Audio only")]
+    }
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(QualityPicker.options, id: \.0) { o in
+            ForEach(options, id: \.0) { o in
                 let on = m.mediaQuality == o.0
                 Button { withAnimation(.easeInOut(duration: 0.15)) { m.mediaQuality = o.0 } } label: {
                     Text(L(o.1, o.2)).lineLimit(1).fixedSize().font(.system(size: 11, weight: .semibold))
@@ -1728,7 +1741,7 @@ struct MediaCard: View {
                     }
                     Spacer(minLength: 0)
                     HStack(spacing: 10) {
-                        if m.provider == .video { QualityPicker(m: m) }
+                        if m.provider == .video { QualityPicker(m: m, heights: info.heights) }
                         else { Label(L("MP3, лучшее качество", "MP3, best quality"), systemImage: "music.note").font(.system(size: 12)).foregroundStyle(Theme.dim) }
                         Spacer(minLength: 8)
                         PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.addToQueue(m.preview) }.keyboardShortcut(.defaultAction)
@@ -2099,7 +2112,8 @@ struct HistoryPage: View {
         m.history.filter { (Provider(rawValue: $0.provider)?.category.rawValue ?? "drive") == tab }
             .filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.path.localizedCaseInsensitiveContains(q) }
     }
-    var active: [Job] { m.jobs.filter { $0.state == .running || $0.state == .waiting } }
+    // «Сейчас качается» — только задачи выбранной вкладки (диски / видео / музыка)
+    var active: [Job] { m.jobs.filter { ($0.state == .running || $0.state == .waiting) && $0.provider.category.rawValue == tab } }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
