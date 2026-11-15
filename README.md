@@ -1,29 +1,34 @@
-<p align="center"><img src="icon/AppIcon.iconset/icon_256x256.png" width="128" alt="DiskLoader"></p>
+<p align="center"><img src="icon/AppIcon.iconset/icon_256x256.png" width="128" alt="MegaLoader"></p>
 
-<h1 align="center">DiskLoader</h1>
-<p align="center">Download files and folders directly from cloud drive links.</p>
+<h1 align="center">MegaLoader</h1>
+<p align="center">Download anything from one link — cloud drives, YouTube, TikTok, Instagram, Spotify, SoundCloud and more.</p>
 
 ---
 
 Paste a link — see what's inside — pick what you need — download. No browser, no accounts, no extra windows.
 
-- whole folders or single files, structure preserved
+**Cloud drives:** Yandex Disk · Google Drive · Dropbox · WeTransfer · Mail.ru Cloud · OneDrive · pCloud
+**Video:** YouTube · TikTok · Instagram · VK · Vimeo · X (Twitter) · Twitch · Rutube
+**Music:** Spotify · SoundCloud · YouTube Music · Bandcamp · Mixcloud
+<sub>…and 1000+ other sites. Public links only. Dropbox folders download as a single archive. Spotify is copy-protected, so tracks are matched by name on YouTube Music.</sub>
+
+- whole folders, playlists and albums — or pick single files
+- video quality: best, 4K, 1080p, 720p or audio only (MP3)
 - large files download over multiple connections
 - pause and resume from the same spot, even after a restart
 - queue several links at once
-- download history
-- updates itself
+- history split into drives, video and music
+- updates itself, video engine too
 - English and Russian interface
-
-**Works with:** Yandex Disk · Google Drive · Dropbox · WeTransfer · Mail.ru Cloud · OneDrive · pCloud
-<sub>Public links only (“anyone with the link”). Dropbox folders download as a single archive.</sub>
 
 ## Download
 
 **macOS 14+** · Apple Silicon & Intel → [latest release](../../releases/latest)
 
-1. Open `DiskLoader-<version>.dmg` and drag DiskLoader to Applications.
+1. Open `MegaLoader-<version>.dmg` and drag MegaLoader to Applications.
 2. First launch: **System Settings → Privacy & Security → Open Anyway** (the app isn't signed with an Apple certificate).
+
+The video engine ([yt-dlp](https://github.com/yt-dlp/yt-dlp) + ffmpeg, ~100 MB) is downloaded on first use.
 
 Windows — coming later.
 
