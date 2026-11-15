@@ -573,7 +573,9 @@ struct PendingMedia: Identifiable {
     var userPicked = false            // человек сам выбрал качество — полный разбор его не трогает
 }
 
-struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = [] }
+struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = []
+    var slow: [Int: Double] = [:]   // ступени без H.264 у этого ролика → примерное время перекодирования, с
+}
 
 enum Media {
     static let musicHosts = ["soundcloud.com", "bandcamp.com", "mixcloud.com", "audiomack.com", "open.spotify.com", "spotify.link", "music.youtube.com", "music.apple.com"]
@@ -792,8 +794,20 @@ enum Media {
         // каждую реальную высоту относим к ближайшей ступени не выше её
         let std = [2160, 1440, 1080, 720, 480, 360, 240, 144]
         let steps = Array(Set(hs.compactMap { h in std.first { $0 <= Int(Double(h) * 1.05) } })).sorted(by: >)
+        // ступени, где у ролика нет H.264 (YouTube 2K/4K — только VP9/AV1): после скачивания будет перекодирование
+        var slow: [Int: Double] = [:]
+        let vfs = (j["formats"] as? [[String: Any]] ?? []).filter { ($0["height"] as? Int ?? 0) > 0 }
+        for st in steps {
+            let at = vfs.filter { f in std.first { $0 <= Int(Double(f["height"] as? Int ?? 0) * 1.05) } == st }
+            let codecs = at.map { ($0["vcodec"] as? String ?? "").lowercased() }
+            // кодек неизвестен — не пугаем зря; пометка только когда точно нет H.264
+            if codecs.isEmpty || codecs.contains(where: { $0.isEmpty || $0 == "none" || $0.hasPrefix("avc") || $0.hasPrefix("h264") }) { continue }
+            let w = Double(at.compactMap { $0["width"] as? Int }.max() ?? st * 16 / 9), fps = at.compactMap { $0["fps"] as? Double }.max() ?? 30
+            let dur = j["duration"] as? Double ?? 0
+            slow[st] = dur * fps * w * Double(st) / 8.0e8   // видеокарта M-серии: ~110 кадров/с в 4K (замер), с запасом
+        }
         let f = RemoteFile(relPath: title, size: nil, source: .media(url: (j["webpage_url"] as? String) ?? link, quality: q, site: site))
-        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps))
+        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps, slow: slow))
     }
 
     /// скачать одно видео/трек; прогресс — в raw, пауза — остановкой процесса (докачка через .part)
@@ -2078,6 +2092,11 @@ func siteOf(_ files: [RemoteFile]) -> String? {
 struct QualityPicker: View {
     @Binding var value: String
     var heights: [Int] = []          // пусто — плейлист: общий набор «до …»
+    var slow: [Int: Double] = [:]    // ступени, которые придётся перекодировать (нет H.264)
+    static func approx(_ sec: Double) -> String {
+        let m = Int((sec / 60).rounded(.up))
+        return sec < 60 ? L("меньше минуты", "under a minute") : L("~\(m) мин", "~\(m) min")
+    }
     static func label(_ h: Int) -> String { h == 2160 ? "4K" : h == 1440 ? "2K" : "\(h)p" }
     var options: [(String, String, String)] {
         let hs = heights.isEmpty ? [2160, 1080, 720] : heights   // пусто — плейлист: «до 4K / до 1080p / до 720p»
@@ -2088,10 +2107,14 @@ struct QualityPicker: View {
             ForEach(options, id: \.0) { o in
                 let on = value == o.0
                 Button { withAnimation(.easeInOut(duration: 0.15)) { value = o.0 } } label: {
-                    Text(L(o.1, o.2)).lineLimit(1).fixedSize().font(.system(size: 11, weight: .semibold))
+                    HStack(spacing: 3) {
+                        Text(L(o.1, o.2)).lineLimit(1).fixedSize()
+                        if Int(o.0).map({ slow[$0] != nil }) == true { Image(systemName: "timer").font(.system(size: 9, weight: .semibold)) }
+                    }.font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(on ? Color.white : Theme.dim).padding(.horizontal, 9).padding(.vertical, 5)
                         .background(on ? Theme.pink : Color.clear, in: Capsule())
                 }.buttonStyle(.tap)
+                .help(Int(o.0).flatMap { slow[$0] }.map { L("Это качество у ролика есть только в VP9/AV1 — после скачивания перекодирую в H.264, ", "Only VP9/AV1 at this quality \u{2014} it gets converted to H.264 after download, ") + QualityPicker.approx($0) } ?? "")
             }
         }.fixedSize().padding(3).background(Theme.bg, in: Capsule())
     }
@@ -2123,10 +2146,16 @@ struct MediaCard: View {
                     }
                     Spacer(minLength: 0)
                     HStack(spacing: 10) {
-                        if c.provider == .video { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights) }
+                        if c.provider == .video { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights, slow: c.info.slow) }
                         else { Label(L("MP3, лучшее качество", "MP3, best quality"), systemImage: "music.note").font(.system(size: 12)).foregroundStyle(Theme.dim) }
                         Spacer(minLength: 8)
                         PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.downloadPending(c.id) }
+                    }
+                    if c.provider == .video, let h = Int(c.quality), let sec = c.info.slow[h] {
+                        Label(L("\(QualityPicker.label(h)) у этого ролика есть только в VP9/AV1 — после скачивания перекодирую в H.264, \(QualityPicker.approx(sec))",
+                                "\(QualityPicker.label(h)) is VP9/AV1 only for this video \u{2014} converting to H.264 after download, \(QualityPicker.approx(sec))"),
+                              systemImage: "timer").font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
+                            .transition(.opacity)
                     }
                 }
             }.padding(14)
