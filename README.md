@@ -14,7 +14,7 @@ Paste a link — see what's inside — pick what you need — download. No brows
 <sub>…and 1000+ other sites. Public links only. Dropbox folders download as a single archive. Spotify is copy-protected, so tracks are matched by name on YouTube Music.</sub>
 
 - whole folders, playlists and albums — or pick single files
-- video quality: only what the video really has, up to 4K, or audio only (MP3); every video plays on Mac, Windows, DaVinci Resolve and Premiere (H.264 + AAC)
+- video quality: only what the video really has, up to 4K, or audio only (MP3); no re-encoding: up to 1080p in H.264, 2K/4K in AV1 (MP4 + AAC) — opens in DaVinci Resolve and Premiere Pro
 - large files download over multiple connections
 - pause and resume from the same spot, even after a restart
 - queue several links at once

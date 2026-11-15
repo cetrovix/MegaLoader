@@ -608,7 +608,6 @@ struct PendingMedia: Identifiable {
 
 struct MediaInfo { let title: String; let site: String; let duration: Double?; let thumb: URL?; let isPlaylist: Bool; var heights: [Int] = []
     var sizes: [Int: Int64] = [:]   // примерный размер файла по ступеням (для проверки места на диске)
-    var slow: [Int: Double] = [:]   // ступени без H.264 у этого ролика → примерное время перекодирования, с
 }
 
 enum Media {
@@ -827,19 +826,15 @@ enum Media {
         let hs = Set((j["formats"] as? [[String: Any]] ?? []).compactMap { $0["height"] as? Int })
         // каждую реальную высоту относим к ближайшей ступени не выше её
         let std = [2160, 1440, 1080, 720, 480, 360, 240, 144]
-        let steps = Array(Set(hs.compactMap { h in std.first { $0 <= Int(Double(h) * 1.05) } })).sorted(by: >)
-        // ступени, где у ролика нет H.264 (YouTube 2K/4K — только VP9/AV1): после скачивания будет перекодирование
-        var slow: [Int: Double] = [:]
+        var steps = Array(Set(hs.compactMap { h in std.first { $0 <= Int(Double(h) * 1.05) } })).sorted(by: >)
+        // ступени, где у ролика есть только VP9 (его не открывают QuickTime/Premiere) — не предлагаем: качаем то, что открывается сразу
         let vfs = (j["formats"] as? [[String: Any]] ?? []).filter { ($0["height"] as? Int ?? 0) > 0 }
-        for st in steps {
-            let at = vfs.filter { f in std.first { $0 <= Int(Double(f["height"] as? Int ?? 0) * 1.05) } == st }
-            let codecs = at.map { ($0["vcodec"] as? String ?? "").lowercased() }
-            // кодек неизвестен — не пугаем зря; пометка только когда точно нет H.264
-            if codecs.isEmpty || codecs.contains(where: { $0.isEmpty || $0 == "none" || $0.hasPrefix("avc") || $0.hasPrefix("h264") }) { continue }
-            let w = Double(at.compactMap { $0["width"] as? Int }.max() ?? st * 16 / 9), fps = at.compactMap { $0["fps"] as? Double }.max() ?? 30
-            let dur = j["duration"] as? Double ?? 0
-            slow[st] = dur * fps * w * Double(st) / 8.0e8   // видеокарта M-серии: ~110 кадров/с в 4K (замер), с запасом
+        func isVP9(_ f: [String: Any]) -> Bool { let c = (f["vcodec"] as? String ?? "").lowercased(); return c.hasPrefix("vp9") || c.hasPrefix("vp09") || c.hasPrefix("vp8") }
+        let playable = steps.filter { st in
+            let at = vfs.filter { f in std.first { $0 <= Int(Double(f["height"] as? Int ?? 0) * 1.05) } == st && (f["vcodec"] as? String ?? "") != "none" }
+            return at.isEmpty || at.contains { !isVP9($0) }
         }
+        if !playable.isEmpty { steps = playable }
         // примерный размер: лучший по битрейту вариант ступени + звук
         var sizes: [Int: Int64] = [:]
         let dur0 = j["duration"] as? Double ?? 0
@@ -850,13 +845,14 @@ enum Media {
         let aBest = (j["formats"] as? [[String: Any]] ?? []).filter { ($0["vcodec"] as? String) == "none" && ($0["acodec"] as? String ?? "none") != "none" }.map(fsize).max() ?? 0
         for st in steps {
             let at = vfs.filter { f in std.first { $0 <= Int(Double(f["height"] as? Int ?? 0) * 1.05) } == st && (f["vcodec"] as? String ?? "") != "none" }
-            guard let best = at.max(by: { ($0["tbr"] as? Double ?? 0) < ($1["tbr"] as? Double ?? 0) }) else { continue }
+            let pref = at.filter { !isVP9($0) }.isEmpty ? at : at.filter { !isVP9($0) }
+            guard let best = pref.max(by: { ($0["tbr"] as? Double ?? 0) < ($1["tbr"] as? Double ?? 0) }) else { continue }
             let hasAudio = (best["acodec"] as? String ?? "none") != "none"
             let v = fsize(best) + (hasAudio ? 0 : aBest)
             if v > 0 { sizes[st] = Int64(v) }
         }
         let f = RemoteFile(relPath: title, size: nil, source: .media(url: (j["webpage_url"] as? String) ?? link, quality: q, site: site))
-        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps, sizes: sizes, slow: slow))
+        return (ListResult(rootName: "", files: [f], skipped: []), MediaInfo(title: title, site: site, duration: j["duration"] as? Double, thumb: thumb, isPlaylist: false, heights: steps, sizes: sizes))
     }
 
     /// скачать одно видео/трек; прогресс — в raw, пауза — остановкой процесса (докачка через .part)
@@ -884,7 +880,9 @@ enum Media {
                     "-P", dir.path, "-o", ".megaloader-\(fid.uuidString).%(ext)s", "--ffmpeg-location", ffmpeg.path] + cookieArgs()
         if quality == "audio" { args += ["-f", "ba/b", "-x", "--audio-format", "mp3", "--audio-quality", "0"] }
         else {
-            args += ["-f", "bv*+ba/b", "--merge-output-format", "mp4", "--concurrent-fragments", "8",
+            // как ClipGrab: 2K/4K — AV1 в MP4 (YouTube отдаёт H.264 только до 1080p), звук AAC; склейка без перекодирования.
+            // VP9 берём только если другого нет вовсе (тогда — перекодирование в H.264)
+            args += ["-f", "bv*[vcodec!^=vp9][vcodec!^=vp09]+ba/bv*+ba/b", "--merge-output-format", "mp4", "--concurrent-fragments", "8",
                      "--remux-video", "mp4",
                      "-S", (Int(quality) == nil ? "res" : "res:\(quality)") + ",hdr:sdr,vcodec:avc1,acodec:m4a,ext:mp4:m4a"]
         }
@@ -983,7 +981,7 @@ extension Media {
         let lines = info.split(separator: "\n").map(String.init)
         let vline = lines.first { $0.contains("Video:") }?.lowercased() ?? ""
         let aline = lines.first { $0.contains("Audio:") }?.lowercased() ?? ""
-        let vOK = vline.isEmpty || vline.contains("video: h264")
+        let vOK = vline.isEmpty || vline.contains("video: h264") || vline.contains("video: av1")   // AV1 в MP4 — DaVinci, Premiere, QuickTime (M3+)
         let aOK = aline.isEmpty || aline.contains("audio: aac")
         let pixOK = vline.isEmpty || vline.contains("yuv420p,") || vline.contains("yuv420p(")
         if vOK && aOK && pixOK && file.pathExtension.lowercased() == "mp4" { return file }
@@ -2182,11 +2180,6 @@ func siteOf(_ files: [RemoteFile]) -> String? {
 struct QualityPicker: View {
     @Binding var value: String
     var heights: [Int] = []          // пусто — плейлист: общий набор «до …»
-    var slow: [Int: Double] = [:]    // ступени, которые придётся перекодировать (нет H.264)
-    static func approx(_ sec: Double) -> String {
-        let m = Int((sec / 60).rounded(.up))
-        return sec < 60 ? L("меньше минуты", "under a minute") : L("~\(m) мин", "~\(m) min")
-    }
     static func label(_ h: Int) -> String { h == 2160 ? "4K" : h == 1440 ? "2K" : "\(h)p" }
     var options: [(String, String, String)] {
         let hs = heights.isEmpty ? [2160, 1080, 720] : heights   // пусто — плейлист: «до 4K / до 1080p / до 720p»
@@ -2197,14 +2190,10 @@ struct QualityPicker: View {
             ForEach(options, id: \.0) { o in
                 let on = value == o.0
                 Button { withAnimation(.easeInOut(duration: 0.15)) { value = o.0 } } label: {
-                    HStack(spacing: 3) {
-                        Text(L(o.1, o.2)).lineLimit(1).fixedSize()
-                        if Int(o.0).map({ slow[$0] != nil }) == true { Image(systemName: "timer").font(.system(size: 9, weight: .semibold)) }
-                    }.font(.system(size: 11, weight: .semibold))
+                    Text(L(o.1, o.2)).lineLimit(1).fixedSize().font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(on ? Color.white : Theme.dim).padding(.horizontal, 9).padding(.vertical, 5)
                         .background(on ? Theme.pink : Color.clear, in: Capsule())
                 }.buttonStyle(.tap)
-                .help(Int(o.0).flatMap { slow[$0] }.map { L("Это качество у ролика есть только в VP9/AV1 — после скачивания перекодирую в H.264, ", "Only VP9/AV1 at this quality \u{2014} it gets converted to H.264 after download, ") + QualityPicker.approx($0) } ?? "")
             }
         }.fixedSize().padding(3).background(Theme.bg, in: Capsule())
     }
@@ -2236,16 +2225,10 @@ struct MediaCard: View {
                     }
                     Spacer(minLength: 0)
                     HStack(spacing: 10) {
-                        if c.provider.isVideo { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights, slow: c.info.slow) }
+                        if c.provider.isVideo { QualityPicker(value: Binding(get: { c.quality }, set: { c.quality = $0; c.userPicked = true }), heights: c.info.heights) }
                         else { Label(L("MP3, лучшее качество", "MP3, best quality"), systemImage: "music.note").font(.system(size: 12)).foregroundStyle(Theme.dim) }
                         Spacer(minLength: 8)
                         PinkButton(title: L("Скачать", "Download"), icon: "arrow.down") { m.downloadPending(c.id) }
-                    }
-                    if c.provider.isVideo, let h = Int(c.quality), let sec = c.info.slow[h] {
-                        Label(L("\(QualityPicker.label(h)) у этого ролика есть только в VP9/AV1 — после скачивания перекодирую в H.264, \(QualityPicker.approx(sec))",
-                                "\(QualityPicker.label(h)) is VP9/AV1 only for this video \u{2014} converting to H.264 after download, \(QualityPicker.approx(sec))"),
-                              systemImage: "timer").font(.system(size: 11)).foregroundStyle(Theme.dim).lineLimit(2)
-                            .transition(.opacity)
                     }
                     if c.provider == .stream { StreamRange(c: $c) }
                 }
